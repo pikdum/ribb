@@ -131,7 +131,7 @@ fn label_chip(s: &str) -> El<'static> {
 /// Rough rendered width of a chip with the given label text (size-13 font plus
 /// horizontal padding). Used to pack chips into width-aware rows.
 fn chip_width(text: &str) -> f32 {
-    text.chars().count() as f32 * 7.5 + 26.0
+    text.chars().count() as f32 * 7.5 + 34.0
 }
 
 /// Pack pre-measured chips into centered rows that wrap at `max_w` — an
@@ -161,18 +161,25 @@ fn flow(items: Vec<(f32, El<'static>)>, max_w: f32) -> El<'static> {
     Column::with_children(rows).spacing(6).align_x(Center).into()
 }
 
-/// Fit `(iw, ih)` into `max_w` × `max_h`, preserving aspect ratio (ebb's
-/// `calculateRenderSize`). Falls back to filling the width when dims are unknown.
+/// Fit `(iw, ih)` within `max_w` × `max_h`, preserving aspect ratio and never
+/// upscaling past the image's natural size (ebb's `max-w-full` / `max-h`).
+/// Falls back to filling the width when dims are unknown.
 fn render_size(iw: u32, ih: u32, max_w: f32, max_h: f32) -> (f32, f32) {
     if iw == 0 || ih == 0 {
         return (max_w, max_h);
     }
-    let aspect = iw as f32 / ih as f32;
-    let mut w = max_w;
-    let mut h = w / aspect;
+    let mut w = iw as f32;
+    let mut h = ih as f32;
+    // Only ever scale down — to fit the width, then the height.
+    if w > max_w {
+        let s = max_w / w;
+        w *= s;
+        h *= s;
+    }
     if h > max_h {
-        h = max_h;
-        w = h * aspect;
+        let s = max_h / h;
+        w *= s;
+        h *= s;
     }
     (w.floor(), h.floor())
 }
@@ -721,9 +728,18 @@ fn tag_button(
         .padding([2, 12])
         .on_press(Message::TagClicked(tag_owned.clone()))
         .style(pill(bg_color, hover));
-    let base: El<'static> = mouse_area(pill_btn)
+    let hover_area = mouse_area(pill_btn)
         .on_enter(Message::TagHovered(Some(tag_owned.clone())))
-        .on_exit(Message::TagHovered(None))
+        .on_exit(Message::TagHovered(None));
+    // Reserve a margin (always, so hover doesn't shift layout) for the `+` to
+    // overlap the pill's top-right corner.
+    let base: El<'static> = container(hover_area)
+        .padding(iced::Padding {
+            top: 8.0,
+            right: 9.0,
+            bottom: 8.0,
+            left: 0.0,
+        })
         .into();
 
     if !hovered {
