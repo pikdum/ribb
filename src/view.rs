@@ -328,7 +328,7 @@ impl Ribb {
 
         // Slightly taller vertical padding to match ebb's header height.
         container(form)
-            .padding([9, 8])
+            .padding([10, 8])
             .width(Length::Fill)
             .style(bg(style::WHITE))
             .into()
