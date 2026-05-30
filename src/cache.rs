@@ -40,34 +40,60 @@ pub enum ImageState {
     Failed,
 }
 
-/// URL-keyed cache of fetched images.
+/// Which resolution of an image is wanted. The same URL can be both a grid
+/// thumbnail and the expanded full image (e.g. a small Danbooru post whose
+/// original file is also its preview), so they're cached separately — otherwise
+/// the low-res thumbnail would be reused, upscaled, for the full view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ImageKind {
+    Thumbnail,
+    Full,
+}
+
+/// URL-keyed cache of fetched images, split by [`ImageKind`].
 #[derive(Debug, Default)]
 pub struct ImageCache {
-    entries: HashMap<String, ImageState>,
+    thumbnails: HashMap<String, ImageState>,
+    full: HashMap<String, ImageState>,
 }
 
 impl ImageCache {
-    pub fn get(&self, url: &str) -> Option<&ImageState> {
-        self.entries.get(url)
+    fn map(&self, kind: ImageKind) -> &HashMap<String, ImageState> {
+        match kind {
+            ImageKind::Thumbnail => &self.thumbnails,
+            ImageKind::Full => &self.full,
+        }
     }
 
-    /// Mark a URL as in-flight. Returns `true` if it was newly inserted (i.e.
-    /// the caller should kick off a fetch), `false` if already known.
-    pub fn begin_load(&mut self, url: &str) -> bool {
-        if self.entries.contains_key(url) {
+    fn map_mut(&mut self, kind: ImageKind) -> &mut HashMap<String, ImageState> {
+        match kind {
+            ImageKind::Thumbnail => &mut self.thumbnails,
+            ImageKind::Full => &mut self.full,
+        }
+    }
+
+    pub fn get(&self, url: &str, kind: ImageKind) -> Option<&ImageState> {
+        self.map(kind).get(url)
+    }
+
+    /// Mark a URL as in-flight for `kind`. Returns `true` if newly inserted
+    /// (the caller should kick off a fetch), `false` if already known.
+    pub fn begin_load(&mut self, url: &str, kind: ImageKind) -> bool {
+        let map = self.map_mut(kind);
+        if map.contains_key(url) {
             return false;
         }
-        self.entries.insert(url.to_string(), ImageState::Loading);
+        map.insert(url.to_string(), ImageState::Loading);
         true
     }
 
     /// Record the result of a fetch+decode. `None` marks failure.
-    pub fn finish_load(&mut self, url: String, decoded: Option<DecodedImage>) {
+    pub fn finish_load(&mut self, url: String, kind: ImageKind, decoded: Option<DecodedImage>) {
         let state = match decoded {
             Some(img) => ImageState::Loaded(Handle::from_rgba(img.width, img.height, img.rgba)),
             None => ImageState::Failed,
         };
-        self.entries.insert(url, state);
+        self.map_mut(kind).insert(url, state);
     }
 }
 

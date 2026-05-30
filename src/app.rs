@@ -18,7 +18,7 @@ use crate::booru::{
     is_image, is_swf, is_video, BooruClient, BooruPost, BooruTag, PostQuery, PostsPage, Rating,
     Site, TagGroup,
 };
-use crate::cache::{fetch_bytes, fetch_image, DecodedImage, ImageCache, ImageState};
+use crate::cache::{fetch_bytes, fetch_image, DecodedImage, ImageCache, ImageKind, ImageState};
 use crate::settings::Settings;
 use crate::style;
 
@@ -162,7 +162,7 @@ pub enum Message {
     OpenTagInNewTab(String),
     OpenExternal(String),
     // Images / SWF
-    ImageLoaded(String, Option<DecodedImage>),
+    ImageLoaded(String, ImageKind, Option<DecodedImage>),
     SwfLoaded {
         tab: u64,
         post_id: String,
@@ -476,8 +476,8 @@ impl Ribb {
             }
 
             // --- Images / SWF ------------------------------------------
-            Message::ImageLoaded(url, decoded) => {
-                self.images.finish_load(url, decoded);
+            Message::ImageLoaded(url, kind, decoded) => {
+                self.images.finish_load(url, kind, decoded);
                 Task::none()
             }
             Message::SwfLoaded {
@@ -609,7 +609,7 @@ impl Ribb {
                 };
                 // Kick off thumbnail loads for the new posts.
                 let urls: Vec<String> = tab.posts.iter().filter_map(preview_url).collect();
-                let mut task = self.load_images(urls, Some(THUMB_MAX), false);
+                let mut task = self.load_images(urls, Some(THUMB_MAX), ImageKind::Thumbnail);
 
                 // Debug: auto-expand a post (prefer an SWF) to exercise the
                 // detail view, full-image, and Ruffle paths headlessly.
@@ -699,7 +699,7 @@ impl Ribb {
                 "expanding full image: {}",
                 post.file_url
             );
-            tasks.push(self.load_images(vec![post.file_url.clone()], Some(cap), true));
+            tasks.push(self.load_images(vec![post.file_url.clone()], Some(cap), ImageKind::Full));
         } else if is_swf(&post.file_url) && !self.tabs[idx].swf.contains_key(&post_id) {
             let http = self.client.http().clone();
             let url = post.file_url.clone();
@@ -775,24 +775,24 @@ impl Ribb {
         target.min(post.width.max(post.height)).min(FULL_MAX_CEIL)
     }
 
-    /// Begin loading any of `urls` not already cached, downscaling to `max_dim`;
-    /// returns a batched Task. Decoding happens off the render thread.
-    /// `high_quality` uses a Lanczos3 filter (full images) vs the fast thumbnail
-    /// path (grid).
+    /// Begin loading any of `urls` not already cached for `kind`, downscaling to
+    /// `max_dim`; returns a batched Task. Decoding happens off the render thread.
+    /// Full images use a Lanczos3 filter; thumbnails use the fast path.
     fn load_images(
         &mut self,
         urls: Vec<String>,
         max_dim: Option<u32>,
-        high_quality: bool,
+        kind: ImageKind,
     ) -> Task<Message> {
+        let high_quality = matches!(kind, ImageKind::Full);
         let mut tasks = Vec::new();
         for url in urls {
-            if self.images.begin_load(&url) {
+            if self.images.begin_load(&url, kind) {
                 let http = self.client.http().clone();
                 let sem = self.image_sem.clone();
                 tasks.push(Task::perform(
                     async move { fetch_image(http, sem, url, max_dim, high_quality).await },
-                    |(url, decoded)| Message::ImageLoaded(url, decoded),
+                    move |(url, decoded)| Message::ImageLoaded(url, kind, decoded),
                 ));
             }
         }

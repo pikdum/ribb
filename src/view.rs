@@ -463,7 +463,7 @@ impl Ribb {
 
     /// A cached image sized to a square cell, or a placeholder while loading.
     fn image_element(&self, url: &str, cell: f32) -> Option<El<'_>> {
-        match self.images.get(url) {
+        match self.images.get(url, ImageKind::Thumbnail) {
             Some(ImageState::Loaded(handle)) => Some(
                 image(handle.clone())
                     .content_fit(ContentFit::Cover)
@@ -506,7 +506,7 @@ impl Ribb {
         let (render_w, render_h) = render_size(post.width, post.height, avail - 8.0, max_h);
 
         let media: El<'a> = if is_image(&post.file_url) {
-            match self.images.get(&post.file_url) {
+            match self.images.get(&post.file_url, ImageKind::Full) {
                 Some(ImageState::Loaded(handle)) => mouse_area(
                     image(handle.clone())
                         .content_fit(ContentFit::Contain)
