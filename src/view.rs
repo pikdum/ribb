@@ -415,10 +415,9 @@ impl Ribb {
             }
             flush(&mut current, &mut rows);
 
-            Column::with_children(rows)
-                .spacing(GRID_GAP)
-                .padding(GRID_GAP)
-                .into()
+            // No outer padding — the grid touches the window edges and the
+            // header border (ebb). Only row/cell gaps remain.
+            Column::with_children(rows).spacing(GRID_GAP).into()
         })
         .into()
     }

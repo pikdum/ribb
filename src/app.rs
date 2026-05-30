@@ -842,9 +842,10 @@ fn grid_cols(width: f32) -> usize {
     }
 }
 
-/// Square cell size for a given width and column count.
+/// Square cell size for a given width and column count. Only the gaps *between*
+/// cells are subtracted — the grid has no outer padding (touches the edges).
 fn grid_cell(width: f32, cols: usize) -> f32 {
-    ((width - GRID_GAP * (cols as f32 + 1.0)) / cols as f32).max(80.0)
+    ((width - GRID_GAP * (cols as f32 - 1.0)) / cols as f32).max(80.0)
 }
 
 /// The word currently being typed — the text after the last space. A query
