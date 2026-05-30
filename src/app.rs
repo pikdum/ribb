@@ -4,14 +4,19 @@
 //! (tabs, settings, shared image cache) and per-tab search state on [`Tab`].
 //! `useEffect`-driven fetches become explicit [`Task`]s returned from `update`.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use iced::advanced::widget::{operation, Id};
 use iced::widget::{
     button, column, container, image, mouse_area, pick_list, responsive, row, scrollable, stack,
     text, text_input, Column, Row, Space,
 };
-use iced::{Border, Center, Color, ContentFit, Element, Length, Size, Subscription, Task, Theme};
+use iced::{
+    Border, Center, Color, ContentFit, Element, Length, Rectangle, Size, Subscription, Task, Theme,
+    Vector,
+};
 use iced_ruffle::{Ruffle, RufflePlayer};
 
 use crate::booru::{
@@ -29,10 +34,6 @@ const GRID_GAP: f32 = 8.0;
 const THUMB_MAX: u32 = 512;
 /// Absolute ceiling on full-image texture size (memory bound).
 const FULL_MAX_CEIL: u32 = 4096;
-/// Vertical space (px) the sticky tab bar + header + divider take, subtracted
-/// from the window height to get the expanded image's max height. Must match
-/// the value used in `expanded_post`.
-const CHROME_H: f32 = 95.0;
 /// Decode full images at this multiple of their display size, then let the GPU
 /// downscale — effectively supersampling, which keeps fine detail crisp on both
 /// 1x and HiDPI displays (iced's GPU sampler has no mipmaps).
@@ -62,9 +63,17 @@ pub struct Ribb {
     /// Caps concurrent image fetch/decode jobs (shared by all fetch Tasks).
     image_sem: Arc<tokio::sync::Semaphore>,
     /// Id of the content scrollable, so we can scroll to an expanded post.
-    scroll_id: iced::advanced::widget::Id,
+    scroll_id: Id,
+    /// Id attached to the image of the post we want to center; an operation
+    /// reads its laid-out bounds to compute the exact scroll offset.
+    anchor_id: Id,
+    /// Post id currently carrying `anchor_id` (the one to scroll to).
+    scroll_anchor: Option<String>,
     /// Tag currently hovered in a detail view (its "open in new tab" + shows).
     hovered_tag: Option<String>,
+    /// Exact content-area (scroll viewport) size, measured by the view's
+    /// `responsive` wrapper and read back here for precise scroll math.
+    viewport: Cell<Size>,
     window: Size,
 }
 
@@ -176,6 +185,8 @@ pub enum Message {
     // Window / input
     WindowResized(Size),
     Key(iced::keyboard::Event),
+    /// Computed scroll offset (content-space y) to center an expanded post.
+    ScrollComputed(f32),
 }
 
 /// A rating choice in the selector, including the "All Content" (`None`) option.
@@ -211,8 +222,11 @@ impl Ribb {
             next_tab_id: 1,
             images: ImageCache::default(),
             image_sem: Arc::new(tokio::sync::Semaphore::new(IMAGE_CONCURRENCY)),
-            scroll_id: iced::advanced::widget::Id::unique(),
+            scroll_id: Id::unique(),
+            anchor_id: Id::unique(),
+            scroll_anchor: None,
             hovered_tag: None,
+            viewport: Cell::new(Size::new(1100.0, 700.0)),
             window: Size::new(1100.0, 800.0),
         }
     }
@@ -290,6 +304,10 @@ impl Ribb {
                 Task::none()
             }
             Message::Key(event) => self.handle_key(event),
+            Message::ScrollComputed(y) => iced::widget::operation::scroll_to(
+                self.scroll_id.clone(),
+                iced::widget::scrollable::AbsoluteOffset { x: 0.0, y },
+            ),
 
             // --- Tabs ---------------------------------------------------
             Message::NewTab => self.push_tab(None, true),
@@ -713,51 +731,18 @@ impl Ribb {
             ));
         }
 
-        // Bring the expanded post into view (ebb scrolls to center it).
-        let y = self.scroll_target_y(idx, &post.id);
-        tasks.push(iced::widget::operation::scroll_to(
-            self.scroll_id.clone(),
-            iced::widget::scrollable::AbsoluteOffset { x: 0.0, y },
-        ));
+        // Mark this post as the scroll anchor; the view tags its image with
+        // `anchor_id`, then the operation reads the laid-out bounds and we
+        // scroll to center it (exact for any number of expanded posts).
+        self.scroll_anchor = Some(post.id.clone());
+        tasks.push(
+            iced::advanced::widget::operate(CenterOnAnchor::new(
+                self.anchor_id.clone(),
+                self.scroll_id.clone(),
+            ))
+            .map(Message::ScrollComputed),
+        );
         Task::batch(tasks)
-    }
-
-    /// Estimate the scroll offset (content-space y) of an expanded post's top,
-    /// so we can bring it into view. Accurate for the common single-expand case;
-    /// approximate when several posts are expanded above the target.
-    fn scroll_target_y(&self, idx: usize, target_id: &str) -> f32 {
-        let tab = &self.tabs[idx];
-        let cols = grid_cols(self.window.width);
-        let cell = grid_cell(self.window.width, cols);
-        let media_h = (self.window.height - 180.0).max(240.0);
-        // media + close button + details panel (rough).
-        let expanded_h = media_h + 300.0;
-
-        let mut y = GRID_GAP;
-        let mut in_row = 0usize;
-        for post in &tab.posts {
-            if post.id == target_id {
-                if in_row > 0 {
-                    y += cell + GRID_GAP;
-                }
-                break;
-            }
-            if tab.selected.contains(&post.id) {
-                if in_row > 0 {
-                    y += cell + GRID_GAP;
-                    in_row = 0;
-                }
-                y += expanded_h + GRID_GAP;
-            } else {
-                in_row += 1;
-                if in_row == cols {
-                    y += cell + GRID_GAP;
-                    in_row = 0;
-                }
-            }
-        }
-        // +1 for the 1px header divider above the scroll content.
-        (y - GRID_GAP + 1.0).max(0.0)
     }
 
     /// Target decode size (longest edge) for a post's full image: ~2x its
@@ -767,9 +752,8 @@ impl Ribb {
         if post.width == 0 || post.height == 0 {
             return FULL_MAX_CEIL;
         }
-        let avail_w = (self.window.width - 8.0).max(80.0);
-        let max_h = (self.window.height - CHROME_H).max(240.0);
-        let (rw, rh) = render_size(post.width, post.height, avail_w, max_h);
+        let vp = self.viewport.get();
+        let (rw, rh) = render_size(post.width, post.height, vp.width, vp.height);
         let target = (rw.max(rh) * FULL_SUPERSAMPLE).ceil() as u32;
         // Never exceed the source's native size or the memory ceiling.
         target.min(post.width.max(post.height)).min(FULL_MAX_CEIL)
@@ -797,6 +781,64 @@ impl Ribb {
             }
         }
         Task::batch(tasks)
+    }
+}
+
+/// A widget operation that finds the laid-out bounds of the anchored image and
+/// the scroll viewport, then computes the scroll offset that centers the image.
+/// Content child bounds are reported untranslated (relative to the scrollable's
+/// top), so the content-space y is simply `anchor.y - scrollable.y`.
+struct CenterOnAnchor {
+    anchor: Id,
+    scroll: Id,
+    anchor_bounds: Option<Rectangle>,
+    scroll_bounds: Option<Rectangle>,
+}
+
+impl CenterOnAnchor {
+    fn new(anchor: Id, scroll: Id) -> Self {
+        Self {
+            anchor,
+            scroll,
+            anchor_bounds: None,
+            scroll_bounds: None,
+        }
+    }
+}
+
+impl operation::Operation<f32> for CenterOnAnchor {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn operation::Operation<f32>)) {
+        operate(self);
+    }
+
+    fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
+        if id == Some(&self.anchor) {
+            self.anchor_bounds = Some(bounds);
+        }
+    }
+
+    fn scrollable(
+        &mut self,
+        id: Option<&Id>,
+        bounds: Rectangle,
+        _content_bounds: Rectangle,
+        _translation: Vector,
+        _state: &mut dyn operation::Scrollable,
+    ) {
+        if id == Some(&self.scroll) {
+            self.scroll_bounds = Some(bounds);
+        }
+    }
+
+    fn finish(&self) -> operation::Outcome<f32> {
+        match (self.anchor_bounds, self.scroll_bounds) {
+            (Some(a), Some(s)) => {
+                let content_y = a.y - s.y;
+                let offset = (content_y - (s.height - a.height) / 2.0).max(0.0);
+                operation::Outcome::Some(offset)
+            }
+            _ => operation::Outcome::None,
+        }
     }
 }
 

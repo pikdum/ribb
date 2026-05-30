@@ -394,6 +394,10 @@ impl Ribb {
 
     fn grid<'a>(&'a self, tab: &'a Tab, viewport_h: f32) -> El<'a> {
         responsive(move |size| {
+            // Record the exact content-area size for precise scroll math in
+            // `update` (the grid's width is the true content width, after any
+            // scrollbar; the height comes from the outer responsive).
+            self.viewport.set(iced::Size::new(size.width, viewport_h));
             let cols = grid_cols(size.width);
             let cell = grid_cell(size.width, cols);
 
@@ -564,7 +568,13 @@ impl Ribb {
 
         let mut stack = Column::new().spacing(8).width(Length::Fill);
         // ebb left-aligns the expanded image (max-w-full, no centering).
-        stack = stack.push(container(media).width(Length::Fill));
+        let mut media_container = container(media).width(Length::Fill);
+        // Tag the post we're scrolling to so the centering operation can read
+        // this image's exact laid-out bounds.
+        if self.scroll_anchor.as_deref() == Some(post.id.as_str()) {
+            media_container = media_container.id(self.anchor_id.clone());
+        }
+        stack = stack.push(media_container);
 
         // Images collapse on click; SWF (you click to interact with the movie)
         // and the video stub get an explicit Close button — as ebb does for SWF.
