@@ -2352,6 +2352,7 @@ dependencies = [
 [[package]]
 name = "iced_ruffle"
 version = "0.1.0"
+source = "git+https://github.com/pikdum/iced_ruffle#df06abd712b8c13fd54065f6bb9597b29d21c625"
 dependencies = [
  "bytemuck",
  "cpal",

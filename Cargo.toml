@@ -34,7 +34,7 @@ html-escape = "0.2"
 # thumbnails/full images; `tokio` drives async Tasks (reqwest fetches).
 iced = { version = "0.14", features = ["tokio", "image", "wgpu", "advanced"] }
 # SWF playback widget (pins iced 0.14 / wgpu 27).
-iced_ruffle = { path = "../iced_ruffle" }
+iced_ruffle = { git = "https://github.com/pikdum/iced_ruffle" }
 # Persist settings under the platform config dir (replaces ebb's localStorage).
 directories = "5"
 tracing = "0.1"
