@@ -42,10 +42,38 @@ fn ghost(_theme: &Theme, status: iced::widget::button::Status) -> iced::widget::
     }
 }
 
+/// A solid colored pill button (fully rounded), with a hover/pressed shade.
+fn pill(
+    bg: Color,
+    hover: Color,
+) -> impl Fn(&Theme, iced::widget::button::Status) -> iced::widget::button::Style {
+    move |_theme, status| {
+        let background = match status {
+            iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => hover,
+            _ => bg,
+        };
+        iced::widget::button::Style {
+            background: Some(background.into()),
+            text_color: style::WHITE,
+            border: iced::border::rounded(999.0),
+            ..iced::widget::button::Style::default()
+        }
+    }
+}
+
 /// Container background fill.
 fn bg(color: Color) -> impl Fn(&Theme) -> iced::widget::container::Style {
     move |_theme| iced::widget::container::Style {
         background: Some(color.into()),
+        ..iced::widget::container::Style::default()
+    }
+}
+
+/// Container with a rounded, colored background (chips/badges).
+fn rounded_bg(color: Color, radius: f32) -> impl Fn(&Theme) -> iced::widget::container::Style {
+    move |_theme| iced::widget::container::Style {
+        background: Some(color.into()),
+        border: iced::border::rounded(radius),
         ..iced::widget::container::Style::default()
     }
 }
@@ -97,8 +125,8 @@ fn format_count(n: u32) -> String {
 /// A small gray pill used as a group/field label.
 fn label_chip(s: &str) -> El<'static> {
     container(text(s.to_string()).size(12).color(style::BLACK))
-        .padding([3, 10])
-        .style(bg(style::GRAY_200))
+        .padding([3, 12])
+        .style(rounded_bg(style::GRAY_200, 4.0))
         .into()
 }
 
@@ -154,20 +182,21 @@ impl Ribb {
     }
 
     fn tab_view<'a>(&'a self, tab: &'a Tab) -> El<'a> {
-        let mut col = Column::new().push(self.header(tab));
+        // The header stays fixed (ebb's `sticky`); only the body scrolls.
+        let mut body = Column::new();
 
         if tab.loading {
-            col = col.push(
+            body = body.push(
                 container(text("Loading…").size(18).color(style::BLUE_500))
                     .padding(24)
                     .center_x(Length::Fill),
             );
         } else {
-            col = col.push(self.grid(tab));
+            body = body.push(self.grid(tab));
         }
 
         if let Some(err) = &tab.error {
-            col = col.push(
+            body = body.push(
                 container(text(err.clone()))
                     .padding(20)
                     .center_x(Length::Fill),
@@ -175,10 +204,15 @@ impl Ribb {
         }
 
         if tab.query.is_none() {
-            col = col.push(self.empty_state());
+            body = body.push(self.empty_state());
         }
 
-        scrollable(col).height(Length::Fill).into()
+        column![
+            self.header(tab),
+            scrollable(body).width(Length::Fill).height(Length::Fill),
+        ]
+        .height(Length::Fill)
+        .into()
     }
 
     fn header<'a>(&'a self, tab: &'a Tab) -> El<'a> {
@@ -458,18 +492,19 @@ impl Ribb {
             .into()
         };
 
-        let close = button(text(format!("Close {}", post.id)).color(style::WHITE))
-            .on_press(Message::TogglePost(post.id.clone()))
-            .style(solid(style::BLUE_500, style::BLUE_600));
+        let mut stack = Column::new().spacing(8).width(Length::Fill);
+        stack = stack.push(container(media).center_x(Length::Fill));
 
-        column![
-            container(media).center_x(Length::Fill),
-            container(close).center_x(Length::Fill),
-            self.post_details(tab, post),
-        ]
-        .spacing(8)
-        .width(Length::Fill)
-        .into()
+        // Images collapse on click; SWF (you click to interact with the movie)
+        // and the video stub get an explicit Close button — as ebb does for SWF.
+        if !is_image(&post.file_url) {
+            let close = button(text(format!("Close {}", post.id)).color(style::WHITE))
+                .on_press(Message::TogglePost(post.id.clone()))
+                .style(solid(style::BLUE_500, style::BLUE_600));
+            stack = stack.push(container(close).center_x(Length::Fill));
+        }
+
+        stack.push(self.post_details(tab, post)).into()
     }
 
     fn post_details<'a>(&self, tab: &Tab, post: &'a BooruPost) -> El<'a> {
@@ -508,14 +543,14 @@ impl Ribb {
                 .size(12)
                 .color(style::WHITE),
         )
-        .padding([3, 10])
-        .style(bg(style::rating_color(&post.rating)));
+        .padding([3, 12])
+        .style(rounded_bg(style::rating_color(&post.rating), 999.0));
 
         let date_chip = container(
             colored(format_date(&post.created_at), style::WHITE).size(12),
         )
-        .padding([3, 10])
-        .style(bg(style::GRAY_700));
+        .padding([3, 12])
+        .style(rounded_bg(style::GRAY_700, 999.0));
 
         let external = button(text("↗").color(style::WHITE).size(12))
             .on_press(Message::OpenExternal(post.post_view.clone()))
@@ -651,11 +686,13 @@ fn tag_button(tag: &str, query_words: &[String], temp_words: &[String]) -> El<'s
     let tag_owned = tag.to_string();
     row![
         button(text(tag_owned.clone()).size(12).color(style::WHITE))
+            .padding([2, 12])
             .on_press(Message::TagClicked(tag_owned.clone()))
-            .style(solid(bg_color, hover)),
-        button(text("+").size(12).color(style::WHITE))
+            .style(pill(bg_color, hover)),
+        button(text("+").size(11).color(style::WHITE))
+            .padding([1, 6])
             .on_press(Message::OpenTagInNewTab(tag_owned))
-            .style(solid(style::INDIGO_400, style::INDIGO_500)),
+            .style(pill(style::INDIGO_400, style::INDIGO_500)),
     ]
     .spacing(2)
     .align_y(Center)

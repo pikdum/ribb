@@ -236,6 +236,10 @@ impl Ribb {
         self.tabs.iter().position(|t| t.id == id)
     }
 
+    pub fn theme(&self) -> Theme {
+        Theme::Light
+    }
+
     pub fn subscription(&self) -> Subscription<Message> {
         let keys = iced::keyboard::listen().map(Message::Key);
         let resizes = iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size));

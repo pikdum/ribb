@@ -9,6 +9,7 @@ fn main() -> iced::Result {
     )
     .title("ribb")
     .window_size((1100.0, 800.0))
+    .theme(ribb::app::Ribb::theme)
     .subscription(ribb::app::Ribb::subscription)
     .run()
 }
