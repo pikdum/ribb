@@ -37,7 +37,6 @@ iced = { version = "0.14", features = ["tokio", "image", "wgpu", "advanced"] }
 iced_ruffle = { path = "../iced_ruffle" }
 # Persist settings under the platform config dir (replaces ebb's localStorage).
 directories = "5"
-bytes = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Open post pages / links in the user's browser.

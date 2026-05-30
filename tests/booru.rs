@@ -217,3 +217,29 @@ async fn danbooru_live_get_tags() {
     let tags = client.get_tags(Site::Danbooru, "land").await.unwrap();
     assert!(!tags.is_empty(), "expected autocomplete results for 'land'");
 }
+
+/// Gelbooru needs credentials, so this is ignored by default. Run with:
+/// `SETTING_GELBOORU_API_CREDENTIALS='&api_key=...&user_id=...' cargo test --test booru -- --ignored`
+#[tokio::test]
+#[ignore = "requires SETTING_GELBOORU_API_CREDENTIALS"]
+async fn gelbooru_live_with_credentials() {
+    let creds = std::env::var("SETTING_GELBOORU_API_CREDENTIALS")
+        .expect("set SETTING_GELBOORU_API_CREDENTIALS to run this test");
+    let client = BooruClient::new().unwrap().with_gelbooru_credentials(creds);
+
+    let query = PostQuery {
+        tags: String::new(),
+        limit: 3,
+        page: 0,
+        rating: None,
+    };
+    let page = client.get_posts(Site::Gelbooru, &query).await.unwrap();
+    assert!(!page.posts.is_empty(), "expected at least one post");
+
+    // Gelbooru fetches tag groups in a follow-up request.
+    let groups = client
+        .get_tag_groups(Site::Gelbooru, &page.posts[0])
+        .await
+        .unwrap();
+    assert!(!groups.is_empty(), "expected category-grouped tags");
+}
