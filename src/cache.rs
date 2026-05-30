@@ -114,6 +114,10 @@ pub async fn fetch_image(
     let bytes = match async {
         client
             .get(&url)
+            // Set Referer to the image's own URL to defeat hotlink protection
+            // (e.g. Gelbooru's CDN serves a non-image page otherwise) — mirrors
+            // ebb's onBeforeSendHeaders.
+            .header(reqwest::header::REFERER, &url)
             .send()
             .await?
             .error_for_status()?
@@ -158,6 +162,7 @@ pub async fn fetch_bytes(client: reqwest::Client, url: String) -> (String, Optio
     let result = async {
         client
             .get(&url)
+            .header(reqwest::header::REFERER, &url)
             .send()
             .await?
             .error_for_status()?
