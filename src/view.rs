@@ -209,7 +209,10 @@ impl Ribb {
 
         column![
             self.header(tab),
-            scrollable(body).width(Length::Fill).height(Length::Fill),
+            scrollable(body)
+                .id(self.scroll_id.clone())
+                .width(Length::Fill)
+                .height(Length::Fill),
         ]
         .height(Length::Fill)
         .into()
@@ -325,17 +328,8 @@ impl Ribb {
 
     fn grid<'a>(&'a self, tab: &'a Tab) -> El<'a> {
         responsive(move |size| {
-            let avail = size.width;
-            let cols = if avail >= 1024.0 {
-                4
-            } else if avail >= 768.0 {
-                3
-            } else if avail >= 640.0 {
-                2
-            } else {
-                1
-            };
-            let cell = ((avail - GRID_GAP * (cols as f32 + 1.0)) / cols as f32).max(80.0);
+            let cols = grid_cols(size.width);
+            let cell = grid_cell(size.width, cols);
 
             let mut rows: Vec<El<'a>> = Vec::new();
             let mut current: Vec<El<'a>> = Vec::new();

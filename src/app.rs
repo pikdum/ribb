@@ -53,6 +53,8 @@ pub struct Ribb {
     images: ImageCache,
     /// Caps concurrent image fetch/decode jobs (shared by all fetch Tasks).
     image_sem: Arc<tokio::sync::Semaphore>,
+    /// Id of the content scrollable, so we can scroll to an expanded post.
+    scroll_id: iced::advanced::widget::Id,
     window: Size,
 }
 
@@ -198,6 +200,7 @@ impl Ribb {
             next_tab_id: 1,
             images: ImageCache::default(),
             image_sem: Arc::new(tokio::sync::Semaphore::new(IMAGE_CONCURRENCY)),
+            scroll_id: iced::advanced::widget::Id::unique(),
             window: Size::new(1100.0, 800.0),
         }
     }
@@ -685,7 +688,51 @@ impl Ribb {
                 },
             ));
         }
+
+        // Bring the expanded post into view (ebb scrolls to center it).
+        let y = self.scroll_target_y(idx, &post.id);
+        tasks.push(iced::widget::operation::scroll_to(
+            self.scroll_id.clone(),
+            iced::widget::scrollable::AbsoluteOffset { x: 0.0, y },
+        ));
         Task::batch(tasks)
+    }
+
+    /// Estimate the scroll offset (content-space y) of an expanded post's top,
+    /// so we can bring it into view. Accurate for the common single-expand case;
+    /// approximate when several posts are expanded above the target.
+    fn scroll_target_y(&self, idx: usize, target_id: &str) -> f32 {
+        let tab = &self.tabs[idx];
+        let cols = grid_cols(self.window.width);
+        let cell = grid_cell(self.window.width, cols);
+        let media_h = (self.window.height - 180.0).max(240.0);
+        // media + close button + details panel (rough).
+        let expanded_h = media_h + 300.0;
+
+        let mut y = GRID_GAP;
+        let mut in_row = 0usize;
+        for post in &tab.posts {
+            if post.id == target_id {
+                if in_row > 0 {
+                    y += cell + GRID_GAP;
+                }
+                break;
+            }
+            if tab.selected.contains(&post.id) {
+                if in_row > 0 {
+                    y += cell + GRID_GAP;
+                    in_row = 0;
+                }
+                y += expanded_h + GRID_GAP;
+            } else {
+                in_row += 1;
+                if in_row == cols {
+                    y += cell + GRID_GAP;
+                    in_row = 0;
+                }
+            }
+        }
+        (y - GRID_GAP).max(0.0)
     }
 
     /// Begin loading any of `urls` not already cached, downscaling to `max_dim`;
@@ -741,6 +788,24 @@ fn build_fetch_task(
             result,
         },
     )
+}
+
+/// Number of grid columns for a given available width (ebb's responsive grid).
+fn grid_cols(width: f32) -> usize {
+    if width >= 1024.0 {
+        4
+    } else if width >= 768.0 {
+        3
+    } else if width >= 640.0 {
+        2
+    } else {
+        1
+    }
+}
+
+/// Square cell size for a given width and column count.
+fn grid_cell(width: f32, cols: usize) -> f32 {
+    ((width - GRID_GAP * (cols as f32 + 1.0)) / cols as f32).max(80.0)
 }
 
 /// The word currently being typed — the text after the last space. A query
