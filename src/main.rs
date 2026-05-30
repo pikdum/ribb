@@ -3,7 +3,7 @@
 fn main() -> iced::Result {
     tracing_subscriber_init();
     iced::application(
-        ribb::app::Ribb::new,
+        ribb::app::Ribb::boot,
         ribb::app::Ribb::update,
         ribb::app::Ribb::view,
     )

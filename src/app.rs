@@ -186,6 +186,27 @@ impl Ribb {
         }
     }
 
+    /// Boot entry point: build state and, when `RIBB_DEBUG_QUERY` is set, kick
+    /// off an initial search so the fetch/render pipeline can be exercised
+    /// headlessly (logs show the result).
+    pub fn boot() -> (Self, Task<Message>) {
+        let mut app = Self::new();
+        let task = match std::env::var("RIBB_DEBUG_QUERY") {
+            Ok(q) => {
+                tracing::info!("debug: auto-searching {q:?}");
+                let tab = &mut app.tabs[0];
+                tab.query = Some(q.clone());
+                tab.temp_query = q.clone();
+                tab.title = if q.is_empty() { "New Tab".into() } else { q };
+                // Search unfiltered in debug mode so results aren't narrowed.
+                tab.rating = None;
+                app.fetch_tab(0)
+            }
+            Err(_) => Task::none(),
+        };
+        (app, task)
+    }
+
     fn active_tab(&self) -> &Tab {
         &self.tabs[self.active]
     }
@@ -363,6 +384,7 @@ impl Ribb {
 
             // --- Images / SWF ------------------------------------------
             Message::ImageLoaded(url, bytes) => {
+                tracing::debug!(ok = bytes.is_some(), "image loaded: {url}");
                 self.images.finish_load(url, bytes);
                 Task::none()
             }
@@ -374,6 +396,7 @@ impl Ribb {
                 if let Some(bytes) = bytes {
                     match RufflePlayer::from_bytes(&post_id, &bytes) {
                         Ok(player) => {
+                            tracing::info!(post = %post_id, size = ?player.size(), "SWF player ready");
                             if let Some(idx) = self.tab_index(tab) {
                                 self.tabs[idx].swf.insert(post_id, player);
                             }
@@ -439,6 +462,13 @@ impl Ribb {
         }
         tab.generation += 1;
         tab.loading = true;
+        tracing::info!(
+            tab = tab.id,
+            site = %tab.site,
+            page = tab.page,
+            query = ?tab.query,
+            "fetching posts"
+        );
         build_fetch_task(
             self.client.clone(),
             tab.id,
@@ -468,6 +498,12 @@ impl Ribb {
 
         match result {
             Ok(page) => {
+                tracing::info!(
+                    tab = tab_id,
+                    posts = page.posts.len(),
+                    has_next = page.has_next_page,
+                    "posts loaded"
+                );
                 let tab = &mut self.tabs[idx];
                 tab.posts = page.posts;
                 tab.has_next_page = page.has_next_page;
@@ -481,10 +517,28 @@ impl Ribb {
                 };
                 // Kick off thumbnail loads for the new posts.
                 let urls: Vec<String> = tab.posts.iter().filter_map(preview_url).collect();
-                self.load_images(urls)
+                let mut task = self.load_images(urls);
+
+                // Debug: auto-expand a post (prefer an SWF) to exercise the
+                // detail view, full-image, and Ruffle paths headlessly.
+                if std::env::var("RIBB_DEBUG_EXPAND").is_ok() {
+                    let tab = &self.tabs[idx];
+                    let target = tab
+                        .posts
+                        .iter()
+                        .find(|p| is_swf(&p.file_url))
+                        .or_else(|| tab.posts.first())
+                        .map(|p| p.id.clone());
+                    if let Some(id) = target {
+                        tracing::info!("debug: auto-expanding post {id}");
+                        task = Task::batch([task, Task::done(Message::TogglePost(id))]);
+                    }
+                }
+                task
             }
             Err(msg) => {
                 if attempt + 1 < MAX_FETCH_ATTEMPTS {
+                    tracing::warn!(tab = tab_id, attempt, "fetch failed: {msg}; retrying");
                     let tab = &mut self.tabs[idx];
                     tab.error = Some(format!("{msg}\nRetrying..."));
                     build_fetch_task(
@@ -498,6 +552,7 @@ impl Ribb {
                         attempt + 1,
                     )
                 } else {
+                    tracing::error!(tab = tab_id, "fetch failed: {msg}");
                     let tab = &mut self.tabs[idx];
                     tab.posts.clear();
                     tab.selected.clear();
