@@ -181,7 +181,9 @@ fn render_size(iw: u32, ih: u32, max_w: f32, max_h: f32) -> (f32, f32) {
         w *= s;
         h *= s;
     }
-    (w.floor(), h.floor())
+    // Don't floor — truncating the fractional viewport height leaves the image
+    // ~1px short of filling it.
+    (w, h)
 }
 
 // ----- views ----------------------------------------------------------------
@@ -237,6 +239,26 @@ impl Ribb {
 
     fn tab_view<'a>(&'a self, tab: &'a Tab) -> El<'a> {
         // The header stays fixed (ebb's `sticky`); only the body scrolls.
+
+        // Subtle separator under the sticky header (ebb's border-b).
+        let divider = iced::widget::rule::horizontal(1).style(|_theme| iced::widget::rule::Style {
+            color: style::GRAY_200,
+            radius: 0.0.into(),
+            fill_mode: iced::widget::rule::FillMode::Full,
+            snap: true,
+        });
+
+        // `responsive` measures the exact space left for the scroll area (the
+        // content viewport), so the expanded image can fill it precisely
+        // instead of us guessing the chrome height.
+        let area = responsive(move |viewport| self.scroll_area(tab, viewport.height));
+
+        column![self.header(tab), divider, area]
+            .height(Length::Fill)
+            .into()
+    }
+
+    fn scroll_area<'a>(&'a self, tab: &'a Tab, viewport_h: f32) -> El<'a> {
         let mut body = Column::new();
 
         if tab.loading {
@@ -246,7 +268,7 @@ impl Ribb {
                     .center_x(Length::Fill),
             );
         } else {
-            body = body.push(self.grid(tab));
+            body = body.push(self.grid(tab, viewport_h));
         }
 
         if let Some(err) = &tab.error {
@@ -261,24 +283,11 @@ impl Ribb {
             body = body.push(self.empty_state());
         }
 
-        // Subtle separator under the sticky header (ebb's border-b).
-        let divider = iced::widget::rule::horizontal(1).style(|_theme| iced::widget::rule::Style {
-            color: style::GRAY_200,
-            radius: 0.0.into(),
-            fill_mode: iced::widget::rule::FillMode::Full,
-            snap: true,
-        });
-
-        column![
-            self.header(tab),
-            divider,
-            scrollable(body)
-                .id(self.scroll_id.clone())
-                .width(Length::Fill)
-                .height(Length::Fill),
-        ]
-        .height(Length::Fill)
-        .into()
+        scrollable(body)
+            .id(self.scroll_id.clone())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 
     fn header<'a>(&'a self, tab: &'a Tab) -> El<'a> {
@@ -383,7 +392,7 @@ impl Ribb {
             .into()
     }
 
-    fn grid<'a>(&'a self, tab: &'a Tab) -> El<'a> {
+    fn grid<'a>(&'a self, tab: &'a Tab, viewport_h: f32) -> El<'a> {
         responsive(move |size| {
             let cols = grid_cols(size.width);
             let cell = grid_cell(size.width, cols);
@@ -399,7 +408,7 @@ impl Ribb {
             for post in &tab.posts {
                 if tab.selected.contains(&post.id) {
                     flush(&mut current, &mut rows);
-                    rows.push(self.expanded_post(tab, post, size.width));
+                    rows.push(self.expanded_post(tab, post, size.width, viewport_h));
                 } else {
                     current.push(self.thumbnail(post, cell));
                     if current.len() == cols {
@@ -482,10 +491,15 @@ impl Ribb {
         .into()
     }
 
-    fn expanded_post<'a>(&'a self, tab: &'a Tab, post: &'a BooruPost, avail: f32) -> El<'a> {
-        // Max height = the content area below the sticky header, so the image
-        // fills it like ebb (CHROME_H must match `full_image_cap`).
-        let max_h = (self.window.height - CHROME_H).max(240.0);
+    fn expanded_post<'a>(
+        &'a self,
+        tab: &'a Tab,
+        post: &'a BooruPost,
+        avail: f32,
+        viewport_h: f32,
+    ) -> El<'a> {
+        // Max height = the exact content viewport, so the image fills it like ebb.
+        let max_h = viewport_h.max(240.0);
         let media_h = max_h;
         // Size the image to its own aspect within the available area, so wide
         // images aren't letterboxed into a tall fixed box (ebb sizes to content).
