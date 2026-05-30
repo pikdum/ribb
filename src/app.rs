@@ -692,6 +692,13 @@ impl Ribb {
 
         if is_image(&post.file_url) {
             let cap = self.full_image_cap(&post);
+            tracing::info!(
+                native_w = post.width,
+                native_h = post.height,
+                decode_cap = cap,
+                "expanding full image: {}",
+                post.file_url
+            );
             tasks.push(self.load_images(vec![post.file_url.clone()], Some(cap), true));
         } else if is_swf(&post.file_url) && !self.tabs[idx].swf.contains_key(&post_id) {
             let http = self.client.http().clone();
