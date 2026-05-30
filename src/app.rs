@@ -180,6 +180,8 @@ pub enum Message {
     // Settings
     OpenSettings,
     CloseSettings,
+    /// Absorbs a click (e.g. on the settings card) so it doesn't propagate.
+    Noop,
     SettingsDraftChanged(String),
     SaveSettings,
     // Window / input
@@ -304,6 +306,7 @@ impl Ribb {
                 Task::none()
             }
             Message::Key(event) => self.handle_key(event),
+            Message::Noop => Task::none(),
             Message::ScrollComputed(y) => iced::widget::operation::scroll_to(
                 self.scroll_id.clone(),
                 iced::widget::scrollable::AbsoluteOffset { x: 0.0, y },

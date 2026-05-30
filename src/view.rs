@@ -191,11 +191,18 @@ fn render_size(iw: u32, ih: u32, max_w: f32, max_h: f32) -> (f32, f32) {
 impl Ribb {
     pub fn view(&self) -> El<'_> {
         let base: El<'_> = column![self.tab_bar(), self.tab_view(self.active_tab())].into();
-        if self.settings_open {
-            stack![base, self.settings_modal()].into()
+        // Always render the stack (with an empty top layer when the modal is
+        // closed) so the base subtree keeps its position in the widget tree —
+        // otherwise toggling the modal resets the scrollable's offset to top.
+        let overlay: El<'_> = if self.settings_open {
+            self.settings_modal()
         } else {
-            base
-        }
+            Space::new()
+                .width(Length::Fixed(0.0))
+                .height(Length::Fixed(0.0))
+                .into()
+        };
+        stack![base, overlay].into()
     }
 
     fn tab_bar(&self) -> El<'_> {
@@ -694,18 +701,25 @@ impl Ribb {
         ]
         .spacing(8);
 
-        let modal = container(column![header, field, actions].spacing(16))
+        let card = container(column![header, field, actions].spacing(16))
             .padding(20)
             .width(Length::Fixed(460.0))
             .style(card);
+        // Absorb clicks on the card so they don't bubble to the scrim (which
+        // would otherwise close the modal).
+        let card = mouse_area(card).on_press(Message::Noop);
 
-        container(modal)
+        let scrim = container(card)
             .width(Length::Fill)
             .height(Length::Fill)
             .center_x(Length::Fill)
             .center_y(Length::Fill)
-            .style(backdrop)
-            .into()
+            .style(backdrop);
+
+        // The scrim absorbs clicks so they don't hit the UI beneath, but does
+        // not close the modal (ebb only closes via X/Cancel/Save). It captures
+        // presses only, so scrolling still passes through to the grid.
+        mouse_area(scrim).on_press(Message::Noop).into()
     }
 
     fn empty_state(&self) -> El<'_> {
