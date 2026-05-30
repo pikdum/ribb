@@ -3,8 +3,6 @@
 
 type El<'a> = Element<'a, Message>;
 
-const MAX_TAGS_PER_ROW: usize = 8;
-
 // ----- small style helpers -------------------------------------------------
 
 /// A solid colored button (white text, rounded), with a hover/pressed shade.
@@ -124,10 +122,59 @@ fn format_count(n: u32) -> String {
 
 /// A small gray pill used as a group/field label.
 fn label_chip(s: &str) -> El<'static> {
-    container(text(s.to_string()).size(12).color(style::BLACK))
+    container(text(s.to_string()).size(13).color(style::BLACK))
         .padding([3, 12])
         .style(rounded_bg(style::GRAY_200, 4.0))
         .into()
+}
+
+/// Rough rendered width of a chip with the given label text (size-13 font plus
+/// horizontal padding). Used to pack chips into width-aware rows.
+fn chip_width(text: &str) -> f32 {
+    text.chars().count() as f32 * 7.5 + 26.0
+}
+
+/// Pack pre-measured chips into centered rows that wrap at `max_w` — an
+/// approximation of ebb's flex-wrap tag layout.
+fn flow(items: Vec<(f32, El<'static>)>, max_w: f32) -> El<'static> {
+    let gap = 6.0;
+    let mut rows: Vec<El<'static>> = Vec::new();
+    let mut current: Vec<El<'static>> = Vec::new();
+    let mut width = 0.0;
+    for (w, el) in items {
+        let add = if current.is_empty() { w } else { w + gap };
+        if !current.is_empty() && width + add > max_w {
+            rows.push(
+                Row::with_children(std::mem::take(&mut current))
+                    .spacing(gap)
+                    .align_y(Center)
+                    .into(),
+            );
+            width = 0.0;
+        }
+        width += if current.is_empty() { w } else { w + gap };
+        current.push(el);
+    }
+    if !current.is_empty() {
+        rows.push(Row::with_children(current).spacing(gap).align_y(Center).into());
+    }
+    Column::with_children(rows).spacing(6).align_x(Center).into()
+}
+
+/// Fit `(iw, ih)` into `max_w` × `max_h`, preserving aspect ratio (ebb's
+/// `calculateRenderSize`). Falls back to filling the width when dims are unknown.
+fn render_size(iw: u32, ih: u32, max_w: f32, max_h: f32) -> (f32, f32) {
+    if iw == 0 || ih == 0 {
+        return (max_w, max_h);
+    }
+    let aspect = iw as f32 / ih as f32;
+    let mut w = max_w;
+    let mut h = w / aspect;
+    if h > max_h {
+        h = max_h;
+        w = h * aspect;
+    }
+    (w.floor(), h.floor())
 }
 
 // ----- views ----------------------------------------------------------------
@@ -207,8 +254,17 @@ impl Ribb {
             body = body.push(self.empty_state());
         }
 
+        // Subtle separator under the sticky header (ebb's border-b).
+        let divider = iced::widget::rule::horizontal(1).style(|_theme| iced::widget::rule::Style {
+            color: style::GRAY_200,
+            radius: 0.0.into(),
+            fill_mode: iced::widget::rule::FillMode::Full,
+            snap: true,
+        });
+
         column![
             self.header(tab),
+            divider,
             scrollable(body)
                 .id(self.scroll_id.clone())
                 .width(Length::Fill)
@@ -227,22 +283,18 @@ impl Ribb {
         let submit = button(text("Search").color(style::WHITE))
             .on_press(Message::SubmitSearch)
             .style(solid(style::BLUE_500, style::BLUE_600));
-        let row1 = row![input, submit].spacing(8).align_y(Center);
 
-        let prev = button(text("‹").size(20))
+        let prev = button(text("‹").size(22))
             .on_press_maybe((tab.page > 0).then_some(Message::PrevPage))
             .style(ghost);
-        let page_no = text(format!("Page {}", tab.page + 1)).size(16);
-        let next = button(text("›").size(20))
+        let page_no = text(format!("Page {}", tab.page + 1)).size(17);
+        let next = button(text("›").size(22))
             .on_press_maybe(tab.has_next_page.then_some(Message::NextPage))
             .style(ghost);
-        let pager = row![prev, page_no, next].spacing(8).align_y(Center);
+        let pager = row![prev, page_no, next].spacing(6).align_y(Center);
 
-        let site_select = pick_list(
-            Site::enabled().to_vec(),
-            Some(tab.site),
-            Message::SiteSelected,
-        );
+        let site_select = pick_list(Site::enabled().to_vec(), Some(tab.site), Message::SiteSelected)
+            .text_size(15);
         let rating_choices: Vec<RatingChoice> = tab
             .site
             .ratings()
@@ -254,18 +306,15 @@ impl Ribb {
             rating_choices,
             Some(RatingChoice(tab.rating)),
             Message::RatingSelected,
-        );
+        )
+        .text_size(15);
 
-        let row2 = row![
-            pager,
-            Space::new().width(Length::Fill),
-            site_select,
-            rating_select
-        ]
-        .spacing(8)
-        .align_y(Center);
+        // Everything on one row (ebb's header), search input flexing to fill.
+        let bar = row![input, submit, pager, site_select, rating_select]
+            .spacing(8)
+            .align_y(Center);
 
-        let mut form = column![row1, row2].spacing(8);
+        let mut form = column![bar].spacing(8);
         if !tab.autocomplete.is_empty() {
             form = form.push(self.autocomplete_list(tab));
         }
@@ -342,7 +391,7 @@ impl Ribb {
             for post in &tab.posts {
                 if tab.selected.contains(&post.id) {
                     flush(&mut current, &mut rows);
-                    rows.push(self.expanded_post(tab, post));
+                    rows.push(self.expanded_post(tab, post, size.width));
                 } else {
                     current.push(self.thumbnail(post, cell));
                     if current.len() == cols {
@@ -426,28 +475,33 @@ impl Ribb {
         .into()
     }
 
-    fn expanded_post<'a>(&'a self, tab: &'a Tab, post: &'a BooruPost) -> El<'a> {
-        let media_h = (self.window.height - 180.0).max(240.0);
+    fn expanded_post<'a>(&'a self, tab: &'a Tab, post: &'a BooruPost, avail: f32) -> El<'a> {
+        // Max height = viewport minus the sticky header (ebb's max-h: 100vh-header).
+        let max_h = (self.window.height - 130.0).max(240.0);
+        let media_h = max_h;
+        // Size the image to its own aspect within the available area, so wide
+        // images aren't letterboxed into a tall fixed box (ebb sizes to content).
+        let (render_w, render_h) = render_size(post.width, post.height, avail - 8.0, max_h);
 
         let media: El<'a> = if is_image(&post.file_url) {
             match self.images.get(&post.file_url) {
                 Some(ImageState::Loaded(handle)) => mouse_area(
                     image(handle.clone())
                         .content_fit(ContentFit::Contain)
-                        .width(Length::Fill)
-                        .height(Length::Fixed(media_h)),
+                        .width(Length::Fixed(render_w))
+                        .height(Length::Fixed(render_h)),
                 )
                 .on_press(Message::TogglePost(post.id.clone()))
                 .into(),
                 Some(ImageState::Failed) => container(text("Failed to load image."))
-                    .height(Length::Fixed(media_h))
+                    .height(Length::Fixed(240.0))
                     .center_x(Length::Fill)
-                    .center_y(Length::Fixed(media_h))
+                    .center_y(Length::Fixed(240.0))
                     .into(),
                 _ => container(text("Loading…").color(style::BLUE_500))
-                    .height(Length::Fixed(media_h))
+                    .height(Length::Fixed(render_h))
                     .center_x(Length::Fill)
-                    .center_y(Length::Fixed(media_h))
+                    .center_y(Length::Fixed(render_h))
                     .into(),
             }
         } else if is_swf(&post.file_url) {
@@ -498,10 +552,10 @@ impl Ribb {
             stack = stack.push(container(close).center_x(Length::Fill));
         }
 
-        stack.push(self.post_details(tab, post)).into()
+        stack.push(self.post_details(tab, post, avail)).into()
     }
 
-    fn post_details<'a>(&self, tab: &Tab, post: &'a BooruPost) -> El<'a> {
+    fn post_details<'a>(&self, tab: &Tab, post: &'a BooruPost, avail: f32) -> El<'a> {
         let query_words: Vec<String> = tab
             .query
             .as_deref()
@@ -527,26 +581,31 @@ impl Ribb {
         };
         groups.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let mut groups_col = Column::new().spacing(8).align_x(Center);
-        for (label, tags) in groups {
-            groups_col = groups_col.push(self.tag_group(&label, &tags, &query_words, &temp_words));
+        // Flatten groups into one centered, width-wrapped flow (ebb's flex-wrap).
+        let hovered = self.hovered_tag.as_deref();
+        let mut chips: Vec<(f32, El<'static>)> = Vec::new();
+        for (label, tags) in &groups {
+            chips.push((chip_width(label), label_chip(label)));
+            for tag in tags {
+                let is_hovered = hovered == Some(tag.as_str());
+                chips.push((
+                    chip_width(tag),
+                    tag_button(tag, &query_words, &temp_words, is_hovered),
+                ));
+            }
         }
+        let max_w = (avail - 24.0).max(160.0);
+        let groups_flow = flow(chips, max_w);
 
-        let rating_chip = container(
-            text(post.rating.clone())
-                .size(12)
-                .color(style::WHITE),
-        )
-        .padding([3, 12])
-        .style(rounded_bg(style::rating_color(&post.rating), 999.0));
+        let rating_chip = container(text(post.rating.clone()).size(13).color(style::WHITE))
+            .padding([3, 12])
+            .style(rounded_bg(style::rating_color(&post.rating), 999.0));
 
-        let date_chip = container(
-            colored(format_date(&post.created_at), style::WHITE).size(12),
-        )
-        .padding([3, 12])
-        .style(rounded_bg(style::GRAY_700, 999.0));
+        let date_chip = container(colored(format_date(&post.created_at), style::WHITE).size(13))
+            .padding([3, 12])
+            .style(rounded_bg(style::GRAY_700, 999.0));
 
-        let external = button(text("↗").color(style::WHITE).size(12))
+        let external = button(text("↗").color(style::WHITE).size(13))
             .on_press(Message::OpenExternal(post.post_view.clone()))
             .style(solid(style::BLUE_500, style::BLUE_600));
 
@@ -561,38 +620,11 @@ impl Ribb {
         .spacing(8)
         .align_y(Center);
 
-        column![groups_col, container(meta).center_x(Length::Fill)]
+        column![groups_flow, container(meta).center_x(Length::Fill)]
             .spacing(16)
             .padding(8)
             .width(Length::Fill)
             .into()
-    }
-
-    /// One tag group: a label chip followed by wrapped, color-coded tag buttons.
-    fn tag_group(
-        &self,
-        label: &str,
-        tags: &[String],
-        query_words: &[String],
-        temp_words: &[String],
-    ) -> El<'static> {
-        let mut col = Column::new().spacing(6).align_x(Center);
-        let mut current: Vec<El<'static>> = vec![label_chip(label)];
-
-        for tag in tags {
-            current.push(tag_button(tag, query_words, temp_words));
-            if current.len() > MAX_TAGS_PER_ROW {
-                col = col.push(
-                    Row::with_children(std::mem::take(&mut current))
-                        .spacing(6)
-                        .align_y(Center),
-                );
-            }
-        }
-        if !current.is_empty() {
-            col = col.push(Row::with_children(current).spacing(6).align_y(Center));
-        }
-        col.into()
     }
 
     fn settings_modal(&self) -> El<'_> {
@@ -667,28 +699,42 @@ impl Ribb {
 }
 
 /// A single tag button, colored by whether it is in the submitted query and/or
-/// the unsubmitted input (ebb's TagButton states).
-fn tag_button(tag: &str, query_words: &[String], temp_words: &[String]) -> El<'static> {
+/// the unsubmitted input (ebb's TagButton states). The "open in new tab" `+`
+/// only appears (overlaid at the top-right) while the tag is hovered, matching
+/// ebb — and because it's an overlay it doesn't change the pill's layout size.
+fn tag_button(
+    tag: &str,
+    query_words: &[String],
+    temp_words: &[String],
+    hovered: bool,
+) -> El<'static> {
     let in_query = query_words.iter().any(|w| w == tag);
     let in_temp = temp_words.iter().any(|w| w == tag);
     let (bg_color, hover) = match (in_query, in_temp) {
-        (true, true) => (style::BLUE_700, style::BLUE_600),   // active & saved
+        (true, true) => (style::BLUE_700, style::BLUE_600),      // active & saved
         (false, true) => (style::PURPLE_500, style::PURPLE_600), // added, unsaved
-        (true, false) => (style::RED_500, style::RED_500),    // removed, unsaved
-        (false, false) => (style::BLUE_500, style::BLUE_700), // default
+        (true, false) => (style::RED_500, style::RED_500),       // removed, unsaved
+        (false, false) => (style::BLUE_500, style::BLUE_700),    // default
     };
     let tag_owned = tag.to_string();
-    row![
-        button(text(tag_owned.clone()).size(12).color(style::WHITE))
-            .padding([2, 12])
-            .on_press(Message::TagClicked(tag_owned.clone()))
-            .style(pill(bg_color, hover)),
-        button(text("+").size(11).color(style::WHITE))
-            .padding([1, 6])
-            .on_press(Message::OpenTagInNewTab(tag_owned))
-            .style(pill(style::INDIGO_400, style::INDIGO_500)),
-    ]
-    .spacing(2)
-    .align_y(Center)
-    .into()
+    let pill_btn = button(text(tag_owned.clone()).size(13).color(style::WHITE))
+        .padding([2, 12])
+        .on_press(Message::TagClicked(tag_owned.clone()))
+        .style(pill(bg_color, hover));
+    let base: El<'static> = mouse_area(pill_btn)
+        .on_enter(Message::TagHovered(Some(tag_owned.clone())))
+        .on_exit(Message::TagHovered(None))
+        .into();
+
+    if !hovered {
+        return base;
+    }
+    let plus = button(text("+").size(12).color(style::WHITE))
+        .padding([0, 5])
+        .on_press(Message::OpenTagInNewTab(tag_owned))
+        .style(pill(style::INDIGO_400, style::INDIGO_500));
+    let plus_overlay = container(plus)
+        .align_right(Length::Fill)
+        .align_top(Length::Fill);
+    stack![base, plus_overlay].into()
 }

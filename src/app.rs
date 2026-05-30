@@ -55,6 +55,8 @@ pub struct Ribb {
     image_sem: Arc<tokio::sync::Semaphore>,
     /// Id of the content scrollable, so we can scroll to an expanded post.
     scroll_id: iced::advanced::widget::Id,
+    /// Tag currently hovered in a detail view (its "open in new tab" + shows).
+    hovered_tag: Option<String>,
     window: Size,
 }
 
@@ -148,6 +150,7 @@ pub enum Message {
     AutocompleteSelected(String),
     TogglePost(String),
     TagClicked(String),
+    TagHovered(Option<String>),
     OpenTagInNewTab(String),
     OpenExternal(String),
     // Images / SWF
@@ -201,6 +204,7 @@ impl Ribb {
             images: ImageCache::default(),
             image_sem: Arc::new(tokio::sync::Semaphore::new(IMAGE_CONCURRENCY)),
             scroll_id: iced::advanced::widget::Id::unique(),
+            hovered_tag: None,
             window: Size::new(1100.0, 800.0),
         }
     }
@@ -449,6 +453,10 @@ impl Ribb {
                     words.push(tag);
                 }
                 tab.temp_query = words.join(" ");
+                Task::none()
+            }
+            Message::TagHovered(tag) => {
+                self.hovered_tag = tag;
                 Task::none()
             }
             Message::OpenTagInNewTab(tag) => self.push_tab(Some(tag), false),
