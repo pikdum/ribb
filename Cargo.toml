@@ -50,6 +50,7 @@ image = { version = "0.25", default-features = false, features = [
     "gif",
     "webp",
 ] }
+lucide-icons = { version = "1.17.0", features = ["iced"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

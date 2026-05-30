@@ -225,7 +225,7 @@ impl Ribb {
             );
             if active && self.tabs.len() > 1 {
                 chip = chip.push(
-                    button(text("✕").size(12).color(style::WHITE))
+                    button(icon_x().size(13).color(style::WHITE))
                         .on_press(Message::CloseTab(tab.id))
                         .style(solid(style::INDIGO_500, style::INDIGO_600)),
                 );
@@ -233,9 +233,9 @@ impl Ribb {
             bar = bar.push(chip);
         }
         bar = bar
-            .push(button(text("+").size(16)).on_press(Message::NewTab).style(ghost))
+            .push(button(icon_plus().size(16)).on_press(Message::NewTab).style(ghost))
             .push(Space::new().width(Length::Fill))
-            .push(button(text("⚙").size(16)).on_press(Message::OpenSettings).style(ghost));
+            .push(button(icon_settings().size(16)).on_press(Message::OpenSettings).style(ghost));
 
         container(bar)
             .padding(8)
@@ -303,15 +303,15 @@ impl Ribb {
             .on_submit(Message::SubmitSearch)
             .padding(8)
             .width(Length::Fill);
-        let submit = button(text("Search").color(style::WHITE))
+        let submit = button(icon_search().size(18).color(style::WHITE))
             .on_press(Message::SubmitSearch)
             .style(solid(style::BLUE_500, style::BLUE_600));
 
-        let prev = button(text("‹").size(22))
+        let prev = button(icon_chevron_left().size(20))
             .on_press_maybe((tab.page > 0).then_some(Message::PrevPage))
             .style(ghost);
         let page_no = text(format!("Page {}", tab.page + 1)).size(17);
-        let next = button(text("›").size(22))
+        let next = button(icon_chevron_right().size(20))
             .on_press_maybe(tab.has_next_page.then_some(Message::NextPage))
             .style(ghost);
         let pager = row![prev, page_no, next].spacing(6).align_y(Center);
@@ -493,7 +493,7 @@ impl Ribb {
 
     fn next_page_cell(&self, cell: f32) -> El<'_> {
         mouse_area(
-            container(text("›").size(96).color(style::GRAY_700))
+            container(icon_chevron_right().size(96).color(style::GRAY_700))
                 .center_x(Length::Fixed(cell))
                 .center_y(Length::Fixed(cell))
                 .style(bg(style::GRAY_200)),
@@ -645,7 +645,7 @@ impl Ribb {
             .padding([3, 12])
             .style(rounded_bg(style::GRAY_700, 999.0));
 
-        let external = button(text("↗").color(style::WHITE).size(13))
+        let external = button(icon_external_link().color(style::WHITE).size(13))
             .on_press(Message::OpenExternal(post.post_view.clone()))
             .style(solid(style::BLUE_500, style::BLUE_600));
 
@@ -671,7 +671,7 @@ impl Ribb {
         let header = row![
             text("Settings").size(20).color(style::BLACK),
             Space::new().width(Length::Fill),
-            button(text("✕").color(style::BLACK))
+            button(icon_x().color(style::BLACK))
                 .on_press(Message::CloseSettings)
                 .style(ghost),
         ]
@@ -785,7 +785,7 @@ fn tag_button(
     if !hovered {
         return base;
     }
-    let plus = button(text("+").size(12).color(style::WHITE))
+    let plus = button(icon_plus().size(12).color(style::WHITE))
         .padding([0, 5])
         .on_press(Message::OpenTagInNewTab(tag_owned))
         .style(pill(style::INDIGO_400, style::INDIGO_500));

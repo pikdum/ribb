@@ -2985,6 +2985,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
+name = "lucide-icons"
+version = "1.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ada83468e5be8c9b17564fc0c0732435311cde019d83aa4d8815c865186ef7d"
+dependencies = [
+ "iced",
+]
+
+[[package]]
 name = "lyon"
 version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4539,6 +4548,7 @@ dependencies = [
  "iced",
  "iced_ruffle",
  "image",
+ "lucide-icons",
  "open",
  "reqwest",
  "serde",

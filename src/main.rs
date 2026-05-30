@@ -11,6 +11,8 @@ fn main() -> iced::Result {
     .window_size((1100.0, 800.0))
     .theme(ribb::app::Ribb::theme)
     .subscription(ribb::app::Ribb::subscription)
+    // Bundle the Lucide icon font (ebb used Feather, which became Lucide).
+    .font(lucide_icons::LUCIDE_FONT_BYTES)
     .run()
 }
 

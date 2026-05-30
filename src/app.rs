@@ -18,6 +18,10 @@ use iced::{
     Vector,
 };
 use iced_ruffle::{Ruffle, RufflePlayer};
+use lucide_icons::iced::{
+    icon_chevron_left, icon_chevron_right, icon_external_link, icon_plus, icon_search,
+    icon_settings, icon_x,
+};
 
 use crate::booru::{
     is_image, is_swf, is_video, BooruClient, BooruPost, BooruTag, PostQuery, PostsPage, Rating,
