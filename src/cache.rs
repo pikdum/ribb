@@ -80,6 +80,7 @@ pub async fn fetch_image(
     sem: Arc<Semaphore>,
     url: String,
     max_dim: Option<u32>,
+    high_quality: bool,
 ) -> (String, Option<DecodedImage>) {
     let _permit = sem.acquire().await;
 
@@ -104,9 +105,10 @@ pub async fn fetch_image(
     let fetch_ms = t0.elapsed().as_millis();
 
     let t1 = Instant::now();
-    let decoded = tokio::task::spawn_blocking(move || decode_and_resize(&bytes, max_dim))
-        .await
-        .unwrap_or(None);
+    let decoded =
+        tokio::task::spawn_blocking(move || decode_and_resize(&bytes, max_dim, high_quality))
+            .await
+            .unwrap_or(None);
     let decode_ms = t1.elapsed().as_millis();
 
     match &decoded {
@@ -147,11 +149,22 @@ pub async fn fetch_bytes(client: reqwest::Client, url: String) -> (String, Optio
 }
 
 /// Decode encoded image bytes to RGBA, downscaling to fit `max_dim` if given.
-fn decode_and_resize(bytes: &[u8], max_dim: Option<u32>) -> Option<DecodedImage> {
+/// `high_quality` selects a Lanczos3 filter (full images) over the fast
+/// `thumbnail` box filter (grid thumbnails).
+fn decode_and_resize(
+    bytes: &[u8],
+    max_dim: Option<u32>,
+    high_quality: bool,
+) -> Option<DecodedImage> {
     let img = image::load_from_memory(bytes).ok()?;
     let img = match max_dim {
-        // `thumbnail` is a fast box filter that preserves aspect ratio.
-        Some(m) if img.width() > m || img.height() > m => img.thumbnail(m, m),
+        Some(m) if img.width() > m || img.height() > m => {
+            if high_quality {
+                img.resize(m, m, image::imageops::FilterType::Lanczos3)
+            } else {
+                img.thumbnail(m, m)
+            }
+        }
         _ => img,
     };
     let rgba = img.to_rgba8();

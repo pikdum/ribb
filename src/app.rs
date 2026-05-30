@@ -27,8 +27,11 @@ const MAX_FETCH_ATTEMPTS: u32 = 3;
 const GRID_GAP: f32 = 8.0;
 /// Longest edge (px) thumbnails are downscaled to — small textures, fast decode.
 const THUMB_MAX: u32 = 512;
-/// Longest edge (px) full images are capped to in the detail view.
-const FULL_MAX: u32 = 1920;
+/// Longest edge (px) full images are capped to in the detail view. High enough
+/// that typical booru art decodes at native resolution (so the GPU does a
+/// single high-quality downscale to display size, like the browser); only very
+/// large images are pre-shrunk, with a Lanczos3 filter.
+const FULL_MAX: u32 = 4096;
 /// Max concurrent image fetch+decode jobs.
 const IMAGE_CONCURRENCY: usize = 12;
 
@@ -601,7 +604,7 @@ impl Ribb {
                 };
                 // Kick off thumbnail loads for the new posts.
                 let urls: Vec<String> = tab.posts.iter().filter_map(preview_url).collect();
-                let mut task = self.load_images(urls, Some(THUMB_MAX));
+                let mut task = self.load_images(urls, Some(THUMB_MAX), false);
 
                 // Debug: auto-expand a post (prefer an SWF) to exercise the
                 // detail view, full-image, and Ruffle paths headlessly.
@@ -683,7 +686,7 @@ impl Ribb {
         ));
 
         if is_image(&post.file_url) {
-            tasks.push(self.load_images(vec![post.file_url.clone()], Some(FULL_MAX)));
+            tasks.push(self.load_images(vec![post.file_url.clone()], Some(FULL_MAX), true));
         } else if is_swf(&post.file_url) && !self.tabs[idx].swf.contains_key(&post_id) {
             let http = self.client.http().clone();
             let url = post.file_url.clone();
@@ -745,14 +748,21 @@ impl Ribb {
 
     /// Begin loading any of `urls` not already cached, downscaling to `max_dim`;
     /// returns a batched Task. Decoding happens off the render thread.
-    fn load_images(&mut self, urls: Vec<String>, max_dim: Option<u32>) -> Task<Message> {
+    /// `high_quality` uses a Lanczos3 filter (full images) vs the fast thumbnail
+    /// path (grid).
+    fn load_images(
+        &mut self,
+        urls: Vec<String>,
+        max_dim: Option<u32>,
+        high_quality: bool,
+    ) -> Task<Message> {
         let mut tasks = Vec::new();
         for url in urls {
             if self.images.begin_load(&url) {
                 let http = self.client.http().clone();
                 let sem = self.image_sem.clone();
                 tasks.push(Task::perform(
-                    async move { fetch_image(http, sem, url, max_dim).await },
+                    async move { fetch_image(http, sem, url, max_dim, high_quality).await },
                     |(url, decoded)| Message::ImageLoaded(url, decoded),
                 ));
             }

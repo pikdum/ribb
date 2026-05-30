@@ -131,13 +131,13 @@ fn label_chip(s: &str) -> El<'static> {
 /// Rough rendered width of a chip with the given label text (size-13 font plus
 /// horizontal padding). Used to pack chips into width-aware rows.
 fn chip_width(text: &str) -> f32 {
-    text.chars().count() as f32 * 7.5 + 34.0
+    text.chars().count() as f32 * 7.5 + 30.0
 }
 
 /// Pack pre-measured chips into centered rows that wrap at `max_w` — an
 /// approximation of ebb's flex-wrap tag layout.
 fn flow(items: Vec<(f32, El<'static>)>, max_w: f32) -> El<'static> {
-    let gap = 6.0;
+    let gap = 4.0;
     let mut rows: Vec<El<'static>> = Vec::new();
     let mut current: Vec<El<'static>> = Vec::new();
     let mut width = 0.0;
@@ -158,7 +158,7 @@ fn flow(items: Vec<(f32, El<'static>)>, max_w: f32) -> El<'static> {
     if !current.is_empty() {
         rows.push(Row::with_children(current).spacing(gap).align_y(Center).into());
     }
-    Column::with_children(rows).spacing(6).align_x(Center).into()
+    Column::with_children(rows).spacing(2).align_x(Center).into()
 }
 
 /// Fit `(iw, ih)` within `max_w` × `max_h`, preserving aspect ratio and never
@@ -735,9 +735,9 @@ fn tag_button(
     // overlap the pill's top-right corner.
     let base: El<'static> = container(hover_area)
         .padding(iced::Padding {
-            top: 8.0,
-            right: 9.0,
-            bottom: 8.0,
+            top: 5.0,
+            right: 6.0,
+            bottom: 0.0,
             left: 0.0,
         })
         .into();
