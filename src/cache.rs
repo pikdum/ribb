@@ -1,12 +1,36 @@
 //! In-memory image cache.
 //!
 //! iced re-runs `view()` constantly, so thumbnails and full images must be
-//! fetched once and cached — never refetched per frame. Entries are keyed by
-//! URL and shared across all tabs.
+//! fetched once and cached — never refetched per frame. Crucially, images are
+//! **decoded and downscaled in worker tasks** (off the render thread) and
+//! handed to iced as ready RGBA via [`Handle::from_rgba`]; using
+//! `Handle::from_bytes` instead would defer decoding to the single render
+//! thread, stalling the UI while ~100 thumbnails decode one at a time.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
 
 use iced::widget::image::Handle;
+use tokio::sync::Semaphore;
+
+/// A decoded, ready-to-upload RGBA image.
+#[derive(Clone)]
+pub struct DecodedImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+impl std::fmt::Debug for DecodedImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecodedImage")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("bytes", &self.rgba.len())
+            .finish()
+    }
+}
 
 /// Load state of a single image URL.
 #[derive(Debug, Clone)]
@@ -27,10 +51,6 @@ impl ImageCache {
         self.entries.get(url)
     }
 
-    pub fn contains(&self, url: &str) -> bool {
-        self.entries.contains_key(url)
-    }
-
     /// Mark a URL as in-flight. Returns `true` if it was newly inserted (i.e.
     /// the caller should kick off a fetch), `false` if already known.
     pub fn begin_load(&mut self, url: &str) -> bool {
@@ -41,19 +61,72 @@ impl ImageCache {
         true
     }
 
-    /// Record the result of a fetch. `None` bytes (or undecodable) marks failure.
-    pub fn finish_load(&mut self, url: String, bytes: Option<Vec<u8>>) {
-        let state = match bytes {
-            Some(bytes) => ImageState::Loaded(Handle::from_bytes(bytes)),
+    /// Record the result of a fetch+decode. `None` marks failure.
+    pub fn finish_load(&mut self, url: String, decoded: Option<DecodedImage>) {
+        let state = match decoded {
+            Some(img) => ImageState::Loaded(Handle::from_rgba(img.width, img.height, img.rgba)),
             None => ImageState::Failed,
         };
         self.entries.insert(url, state);
     }
 }
 
-/// Fetch raw image bytes for `url`. Returns the URL alongside the bytes so the
-/// caller can route the result back into the cache. Errors become `None`.
-pub async fn fetch_image(client: reqwest::Client, url: String) -> (String, Option<Vec<u8>>) {
+/// Fetch `url`, then decode and (optionally) downscale it on a blocking worker
+/// so neither the network wait nor the CPU decode touches the render thread.
+/// `max_dim` bounds the longer edge (preserving aspect); `None` keeps full size.
+/// `sem` caps how many fetch/decode jobs run at once.
+pub async fn fetch_image(
+    client: reqwest::Client,
+    sem: Arc<Semaphore>,
+    url: String,
+    max_dim: Option<u32>,
+) -> (String, Option<DecodedImage>) {
+    let _permit = sem.acquire().await;
+
+    let t0 = Instant::now();
+    let bytes = match async {
+        client
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await
+    }
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!("image fetch failed for {url}: {e}");
+            return (url, None);
+        }
+    };
+    let fetch_ms = t0.elapsed().as_millis();
+
+    let t1 = Instant::now();
+    let decoded = tokio::task::spawn_blocking(move || decode_and_resize(&bytes, max_dim))
+        .await
+        .unwrap_or(None);
+    let decode_ms = t1.elapsed().as_millis();
+
+    match &decoded {
+        Some(img) => {
+            tracing::debug!(
+                fetch_ms,
+                decode_ms,
+                w = img.width,
+                h = img.height,
+                "image ready: {url}"
+            )
+        }
+        None => tracing::warn!(fetch_ms, "image decode failed: {url}"),
+    }
+    (url, decoded)
+}
+
+/// Fetch raw bytes for `url` (no decoding) — used for SWF movies. Returns the
+/// URL alongside the bytes so the caller can route the result.
+pub async fn fetch_bytes(client: reqwest::Client, url: String) -> (String, Option<Vec<u8>>) {
     let result = async {
         client
             .get(&url)
@@ -67,8 +140,24 @@ pub async fn fetch_image(client: reqwest::Client, url: String) -> (String, Optio
     match result {
         Ok(bytes) => (url, Some(bytes.to_vec())),
         Err(e) => {
-            tracing::warn!("image fetch failed for {url}: {e}");
+            tracing::warn!("byte fetch failed for {url}: {e}");
             (url, None)
         }
     }
+}
+
+/// Decode encoded image bytes to RGBA, downscaling to fit `max_dim` if given.
+fn decode_and_resize(bytes: &[u8], max_dim: Option<u32>) -> Option<DecodedImage> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let img = match max_dim {
+        // `thumbnail` is a fast box filter that preserves aspect ratio.
+        Some(m) if img.width() > m || img.height() > m => img.thumbnail(m, m),
+        _ => img,
+    };
+    let rgba = img.to_rgba8();
+    Some(DecodedImage {
+        width: rgba.width(),
+        height: rgba.height(),
+        rgba: rgba.into_raw(),
+    })
 }

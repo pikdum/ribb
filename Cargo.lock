@@ -4537,6 +4537,7 @@ dependencies = [
  "html-escape",
  "iced",
  "iced_ruffle",
+ "image",
  "open",
  "reqwest",
  "serde",

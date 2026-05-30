@@ -41,8 +41,15 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Open post pages / links in the user's browser.
 open = "5"
-# Retry-delay sleeps inside async fetch Tasks.
-tokio = { version = "1", features = ["time"] }
+# Retry-delay sleeps + a semaphore to cap concurrent image fetch/decode.
+tokio = { version = "1", features = ["time", "sync", "rt"] }
+# Decode + downscale thumbnails off the render thread (same version as iced).
+image = { version = "0.25", default-features = false, features = [
+    "jpeg",
+    "png",
+    "gif",
+    "webp",
+] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

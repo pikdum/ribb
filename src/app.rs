@@ -5,6 +5,7 @@
 //! `useEffect`-driven fetches become explicit [`Task`]s returned from `update`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use iced::widget::{
     button, column, container, image, mouse_area, pick_list, responsive, row, scrollable, stack,
@@ -17,13 +18,19 @@ use crate::booru::{
     is_image, is_swf, is_video, BooruClient, BooruPost, BooruTag, PostQuery, PostsPage, Rating,
     Site, TagGroup,
 };
-use crate::cache::{fetch_image, ImageCache, ImageState};
+use crate::cache::{fetch_bytes, fetch_image, DecodedImage, ImageCache, ImageState};
 use crate::settings::Settings;
 use crate::style;
 
 const PAGE_LIMIT: u32 = 100;
 const MAX_FETCH_ATTEMPTS: u32 = 3;
 const GRID_GAP: f32 = 8.0;
+/// Longest edge (px) thumbnails are downscaled to — small textures, fast decode.
+const THUMB_MAX: u32 = 512;
+/// Longest edge (px) full images are capped to in the detail view.
+const FULL_MAX: u32 = 1920;
+/// Max concurrent image fetch+decode jobs.
+const IMAGE_CONCURRENCY: usize = 12;
 
 /// Preview URLs that providers return as placeholders — never worth showing.
 const PREVIEW_BLACKLIST: [&str; 2] = [
@@ -44,6 +51,8 @@ pub struct Ribb {
     active: usize,
     next_tab_id: u64,
     images: ImageCache,
+    /// Caps concurrent image fetch/decode jobs (shared by all fetch Tasks).
+    image_sem: Arc<tokio::sync::Semaphore>,
     window: Size,
 }
 
@@ -140,7 +149,7 @@ pub enum Message {
     OpenTagInNewTab(String),
     OpenExternal(String),
     // Images / SWF
-    ImageLoaded(String, Option<Vec<u8>>),
+    ImageLoaded(String, Option<DecodedImage>),
     SwfLoaded {
         tab: u64,
         post_id: String,
@@ -188,6 +197,7 @@ impl Ribb {
             active: 0,
             next_tab_id: 1,
             images: ImageCache::default(),
+            image_sem: Arc::new(tokio::sync::Semaphore::new(IMAGE_CONCURRENCY)),
             window: Size::new(1100.0, 800.0),
         }
     }
@@ -443,9 +453,8 @@ impl Ribb {
             }
 
             // --- Images / SWF ------------------------------------------
-            Message::ImageLoaded(url, bytes) => {
-                tracing::debug!(ok = bytes.is_some(), "image loaded: {url}");
-                self.images.finish_load(url, bytes);
+            Message::ImageLoaded(url, decoded) => {
+                self.images.finish_load(url, decoded);
                 Task::none()
             }
             Message::SwfLoaded {
@@ -577,7 +586,7 @@ impl Ribb {
                 };
                 // Kick off thumbnail loads for the new posts.
                 let urls: Vec<String> = tab.posts.iter().filter_map(preview_url).collect();
-                let mut task = self.load_images(urls);
+                let mut task = self.load_images(urls, Some(THUMB_MAX));
 
                 // Debug: auto-expand a post (prefer an SWF) to exercise the
                 // detail view, full-image, and Ruffle paths headlessly.
@@ -659,12 +668,12 @@ impl Ribb {
         ));
 
         if is_image(&post.file_url) {
-            tasks.push(self.load_images(vec![post.file_url.clone()]));
+            tasks.push(self.load_images(vec![post.file_url.clone()], Some(FULL_MAX)));
         } else if is_swf(&post.file_url) && !self.tabs[idx].swf.contains_key(&post_id) {
             let http = self.client.http().clone();
             let url = post.file_url.clone();
             tasks.push(Task::perform(
-                async move { fetch_image(http, url).await },
+                async move { fetch_bytes(http, url).await },
                 move |(_url, bytes)| Message::SwfLoaded {
                     tab: tab_id,
                     post_id: post_id.clone(),
@@ -675,15 +684,17 @@ impl Ribb {
         Task::batch(tasks)
     }
 
-    /// Begin loading any of `urls` not already cached; returns a batched Task.
-    fn load_images(&mut self, urls: Vec<String>) -> Task<Message> {
+    /// Begin loading any of `urls` not already cached, downscaling to `max_dim`;
+    /// returns a batched Task. Decoding happens off the render thread.
+    fn load_images(&mut self, urls: Vec<String>, max_dim: Option<u32>) -> Task<Message> {
         let mut tasks = Vec::new();
         for url in urls {
             if self.images.begin_load(&url) {
                 let http = self.client.http().clone();
+                let sem = self.image_sem.clone();
                 tasks.push(Task::perform(
-                    async move { fetch_image(http, url).await },
-                    |(url, bytes)| Message::ImageLoaded(url, bytes),
+                    async move { fetch_image(http, sem, url, max_dim).await },
+                    |(url, decoded)| Message::ImageLoaded(url, decoded),
                 ));
             }
         }
