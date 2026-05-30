@@ -30,5 +30,20 @@ chrono = { version = "0.4", default-features = false, features = [
 # Gelbooru/Rule34 return double-HTML-encoded tag names.
 html-escape = "0.2"
 
+# GUI. `wgpu` + `advanced` match iced_ruffle (shared wgpu device); `image` for
+# thumbnails/full images; `tokio` drives async Tasks (reqwest fetches).
+iced = { version = "0.14", features = ["tokio", "image", "wgpu", "advanced"] }
+# SWF playback widget (pins iced 0.14 / wgpu 27).
+iced_ruffle = { path = "../iced_ruffle" }
+# Persist settings under the platform config dir (replaces ebb's localStorage).
+directories = "5"
+bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Open post pages / links in the user's browser.
+open = "5"
+# Retry-delay sleeps inside async fetch Tasks.
+tokio = { version = "1", features = ["time"] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

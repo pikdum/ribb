@@ -118,6 +118,7 @@ impl Site {
     }
 
     /// Favicon/logo URL (as ebb's `getSites` used).
+    #[allow(dead_code)]
     pub fn icon_url(self) -> &'static str {
         match self {
             Site::Danbooru => "https://danbooru.donmai.us/favicon.svg",
@@ -125,6 +126,12 @@ impl Site {
             Site::E621 => "https://e621.net/packs/static/main-logo-109ca95d0f436bd372a1.png",
             Site::Rule34 => "https://rule34.xxx/apple-touch-icon-precomposed.png",
         }
+    }
+}
+
+impl std::fmt::Display for Site {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
     }
 }
 
