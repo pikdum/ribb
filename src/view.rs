@@ -82,6 +82,18 @@ fn format_date(raw: &str) -> String {
         .unwrap_or_else(|_| raw.to_string())
 }
 
+/// Humanize a post count, e.g. 1234 -> "1.2k", 2_500_000 -> "2.5m".
+fn format_count(n: u32) -> String {
+    let n = n as f64;
+    if n >= 1_000_000.0 {
+        format!("{:.1}m", n / 1_000_000.0)
+    } else if n >= 1_000.0 {
+        format!("{:.1}k", n / 1_000.0)
+    } else {
+        format!("{n:.0}")
+    }
+}
+
 /// A small gray pill used as a group/field label.
 fn label_chip(s: &str) -> El<'static> {
     container(text(s.to_string()).size(12).color(style::BLACK))
@@ -216,10 +228,64 @@ impl Ribb {
         .spacing(8)
         .align_y(Center);
 
-        container(column![row1, row2].spacing(8))
+        let mut form = column![row1, row2].spacing(8);
+        if !tab.autocomplete.is_empty() {
+            form = form.push(self.autocomplete_list(tab));
+        }
+
+        container(form)
             .padding(8)
             .width(Length::Fill)
             .style(bg(style::WHITE))
+            .into()
+    }
+
+    /// Live tag suggestions for the word being typed (ebb's SearchInput dropdown).
+    fn autocomplete_list(&self, tab: &Tab) -> El<'static> {
+        let mut list = Column::new().spacing(2);
+        for tag in &tab.autocomplete {
+            let count = tag
+                .post_count
+                .map(format_count)
+                .unwrap_or_default();
+            let entry = row![
+                colored(tag.label.clone(), tag.category.color().text_color()).size(13),
+                Space::new().width(Length::Fill),
+                text(count).size(13).color(style::GRAY_500),
+            ]
+            .align_y(Center);
+            list = list.push(
+                button(entry)
+                    .on_press(Message::AutocompleteSelected(tag.value.clone()))
+                    .width(Length::Fill)
+                    .style(|_theme, status| {
+                        let background = matches!(
+                            status,
+                            iced::widget::button::Status::Hovered
+                                | iced::widget::button::Status::Pressed
+                        )
+                        .then(|| style::GRAY_100.into());
+                        iced::widget::button::Style {
+                            background,
+                            text_color: style::BLACK,
+                            border: iced::border::rounded(4.0),
+                            ..iced::widget::button::Style::default()
+                        }
+                    }),
+            );
+        }
+        container(list)
+            .padding(4)
+            .width(Length::Fill)
+            .style(|_theme| iced::widget::container::Style {
+                background: Some(style::WHITE.into()),
+                border: Border {
+                    color: style::GRAY_200,
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..iced::widget::container::Style::default()
+            })
             .into()
     }
 

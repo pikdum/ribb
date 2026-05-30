@@ -10,7 +10,7 @@ use iced::widget::{
     button, column, container, image, mouse_area, pick_list, responsive, row, scrollable, stack,
     text, text_input, Column, Row, Space,
 };
-use iced::{Center, Color, ContentFit, Element, Length, Size, Subscription, Task, Theme};
+use iced::{Border, Center, Color, ContentFit, Element, Length, Size, Subscription, Task, Theme};
 use iced_ruffle::{Ruffle, RufflePlayer};
 
 use crate::booru::{
@@ -63,7 +63,7 @@ struct Tab {
     selected: Vec<String>,
     loading: bool,
     error: Option<String>,
-    #[allow(dead_code)]
+    /// Live tag suggestions for the last word being typed.
     autocomplete: Vec<BooruTag>,
     /// Bumped on every fresh fetch so stale responses can be discarded.
     generation: u64,
@@ -129,6 +129,12 @@ pub enum Message {
         post_id: String,
         groups: Vec<TagGroup>,
     },
+    AutocompleteLoaded {
+        tab: u64,
+        query_word: String,
+        tags: Vec<BooruTag>,
+    },
+    AutocompleteSelected(String),
     TogglePost(String),
     TagClicked(String),
     OpenTagInNewTab(String),
@@ -203,6 +209,11 @@ impl Ribb {
                 app.fetch_tab(0)
             }
             Err(_) => Task::none(),
+        };
+        // Debug: simulate typing to exercise the autocomplete path.
+        let task = match std::env::var("RIBB_DEBUG_TYPE") {
+            Ok(typed) => Task::batch([task, Task::done(Message::QueryChanged(typed))]),
+            Err(_) => task,
         };
         (app, task)
     }
@@ -294,8 +305,56 @@ impl Ribb {
 
             // --- Search / filters --------------------------------------
             Message::QueryChanged(value) => {
-                self.tabs[self.active].temp_query = value;
+                let tab = &mut self.tabs[self.active];
+                tab.temp_query = value.clone();
+                // Autocomplete the last word being typed (ebb completes the
+                // word under the caret). A trailing space means "no word".
+                let word = last_word(&value);
+                if word.is_empty() {
+                    tab.autocomplete.clear();
+                    return Task::none();
+                }
+                let (client, site, tab_id) = (self.client.clone(), tab.site, tab.id);
+                Task::perform(
+                    async move { client.get_tags(site, &word).await },
+                    move |res| Message::AutocompleteLoaded {
+                        tab: tab_id,
+                        query_word: last_word(&value),
+                        tags: res.unwrap_or_default(),
+                    },
+                )
+            }
+            Message::AutocompleteLoaded {
+                tab,
+                query_word,
+                tags,
+            } => {
+                if let Some(idx) = self.tab_index(tab) {
+                    // Ignore stale responses for a word no longer being typed.
+                    if last_word(&self.tabs[idx].temp_query) == query_word {
+                        tracing::debug!(word = %query_word, count = tags.len(), "autocomplete");
+                        self.tabs[idx].autocomplete = tags;
+                    }
+                }
                 Task::none()
+            }
+            Message::AutocompleteSelected(value) => {
+                let tab = &mut self.tabs[self.active];
+                // Replace the last word with the selection (ebb's behavior).
+                let last = last_word(&tab.temp_query);
+                let mut combined = tab.temp_query.clone();
+                combined.truncate(combined.len() - last.len());
+                combined.push_str(&value);
+                tab.temp_query = combined.clone();
+                tab.query = Some(combined.clone());
+                tab.title = if combined.is_empty() {
+                    "New Tab".to_string()
+                } else {
+                    combined
+                };
+                tab.page = 0;
+                tab.autocomplete.clear();
+                self.fetch_tab(self.active)
             }
             Message::SubmitSearch => {
                 let tab = &mut self.tabs[self.active];
@@ -306,6 +365,7 @@ impl Ribb {
                     tab.temp_query.clone()
                 };
                 tab.page = 0;
+                tab.autocomplete.clear();
                 self.fetch_tab(self.active)
             }
             Message::NextPage => {
@@ -668,6 +728,19 @@ fn build_fetch_task(
     )
 }
 
+/// The word currently being typed — the text after the last space. A query
+/// ending in whitespace (or empty) has no active word.
+fn last_word(query: &str) -> String {
+    if query.is_empty() || query.ends_with(char::is_whitespace) {
+        return String::new();
+    }
+    query
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
 /// The thumbnail URL ebb's `PostPreview` would pick: first displayable image
 /// among sample → preview → file, skipping known placeholders.
 fn preview_url(post: &BooruPost) -> Option<String> {
@@ -695,3 +768,43 @@ impl Default for Ribb {
 // ---------------------------------------------------------------------------
 
 include!("view.rs");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_word_extracts_active_word() {
+        assert_eq!(last_word("landscape"), "landscape");
+        assert_eq!(last_word("blue sky land"), "land");
+        assert_eq!(last_word("a  b"), "b");
+        assert_eq!(last_word("blue "), ""); // trailing space => no active word
+        assert_eq!(last_word(""), "");
+    }
+
+    #[test]
+    fn format_count_humanizes() {
+        assert_eq!(format_count(5), "5");
+        assert_eq!(format_count(1_500), "1.5k");
+        assert_eq!(format_count(2_500_000), "2.5m");
+    }
+
+    #[test]
+    fn preview_url_skips_placeholder_and_non_images() {
+        let post = BooruPost {
+            id: "1".into(),
+            post_view: String::new(),
+            tags: vec![],
+            tag_groups: vec![],
+            file_url: "https://x/a.webm".into(),
+            preview_url: "https://cdn.donmai.us/images/flash-preview.png".into(),
+            sample_url: Some("https://x/s.jpg".into()),
+            width: 0,
+            height: 0,
+            rating: "general".into(),
+            created_at: String::new(),
+        };
+        // Sample (image) wins over the blacklisted preview and the webm file.
+        assert_eq!(preview_url(&post).as_deref(), Some("https://x/s.jpg"));
+    }
+}
