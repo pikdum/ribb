@@ -483,8 +483,9 @@ impl Ribb {
     }
 
     fn expanded_post<'a>(&'a self, tab: &'a Tab, post: &'a BooruPost, avail: f32) -> El<'a> {
-        // Max height = viewport minus the sticky header (ebb's max-h: 100vh-header).
-        let max_h = (self.window.height - 130.0).max(240.0);
+        // Max height = the content area below the sticky header, so the image
+        // fills it like ebb (CHROME_H must match `full_image_cap`).
+        let max_h = (self.window.height - CHROME_H).max(240.0);
         let media_h = max_h;
         // Size the image to its own aspect within the available area, so wide
         // images aren't letterboxed into a tall fixed box (ebb sizes to content).

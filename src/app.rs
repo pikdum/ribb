@@ -27,11 +27,16 @@ const MAX_FETCH_ATTEMPTS: u32 = 3;
 const GRID_GAP: f32 = 8.0;
 /// Longest edge (px) thumbnails are downscaled to — small textures, fast decode.
 const THUMB_MAX: u32 = 512;
-/// Longest edge (px) full images are capped to in the detail view. High enough
-/// that typical booru art decodes at native resolution (so the GPU does a
-/// single high-quality downscale to display size, like the browser); only very
-/// large images are pre-shrunk, with a Lanczos3 filter.
-const FULL_MAX: u32 = 4096;
+/// Absolute ceiling on full-image texture size (memory bound).
+const FULL_MAX_CEIL: u32 = 4096;
+/// Vertical space (px) the sticky tab bar + header + divider take, subtracted
+/// from the window height to get the expanded image's max height. Must match
+/// the value used in `expanded_post`.
+const CHROME_H: f32 = 88.0;
+/// Decode full images at this multiple of their display size, then let the GPU
+/// downscale — effectively supersampling, which keeps fine detail crisp on both
+/// 1x and HiDPI displays (iced's GPU sampler has no mipmaps).
+const FULL_SUPERSAMPLE: f32 = 2.0;
 /// Max concurrent image fetch+decode jobs.
 const IMAGE_CONCURRENCY: usize = 12;
 
@@ -686,7 +691,8 @@ impl Ribb {
         ));
 
         if is_image(&post.file_url) {
-            tasks.push(self.load_images(vec![post.file_url.clone()], Some(FULL_MAX), true));
+            let cap = self.full_image_cap(&post);
+            tasks.push(self.load_images(vec![post.file_url.clone()], Some(cap), true));
         } else if is_swf(&post.file_url) && !self.tabs[idx].swf.contains_key(&post_id) {
             let http = self.client.http().clone();
             let url = post.file_url.clone();
@@ -744,6 +750,21 @@ impl Ribb {
             }
         }
         (y - GRID_GAP).max(0.0)
+    }
+
+    /// Target decode size (longest edge) for a post's full image: ~2x its
+    /// on-screen size for crisp supersampling, clamped to the source's native
+    /// size and an absolute ceiling.
+    fn full_image_cap(&self, post: &BooruPost) -> u32 {
+        if post.width == 0 || post.height == 0 {
+            return FULL_MAX_CEIL;
+        }
+        let avail_w = (self.window.width - 8.0).max(80.0);
+        let max_h = (self.window.height - CHROME_H).max(240.0);
+        let (rw, rh) = render_size(post.width, post.height, avail_w, max_h);
+        let target = (rw.max(rh) * FULL_SUPERSAMPLE).ceil() as u32;
+        // Never exceed the source's native size or the memory ceiling.
+        target.min(post.width.max(post.height)).min(FULL_MAX_CEIL)
     }
 
     /// Begin loading any of `urls` not already cached, downscaling to `max_dim`;

@@ -2362,6 +2362,7 @@ dependencies = [
  "ruffle_video_software",
  "thiserror 2.0.18",
  "tracing",
+ "url",
 ]
 
 [[package]]
