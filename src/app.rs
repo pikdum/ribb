@@ -32,7 +32,7 @@ const FULL_MAX_CEIL: u32 = 4096;
 /// Vertical space (px) the sticky tab bar + header + divider take, subtracted
 /// from the window height to get the expanded image's max height. Must match
 /// the value used in `expanded_post`.
-const CHROME_H: f32 = 88.0;
+const CHROME_H: f32 = 90.0;
 /// Decode full images at this multiple of their display size, then let the GPU
 /// downscale — effectively supersampling, which keeps fine detail crisp on both
 /// 1x and HiDPI displays (iced's GPU sampler has no mipmaps).

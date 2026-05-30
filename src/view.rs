@@ -326,8 +326,9 @@ impl Ribb {
             form = form.push(self.autocomplete_list(tab));
         }
 
+        // Slightly taller vertical padding to match ebb's header height.
         container(form)
-            .padding(8)
+            .padding([9, 8])
             .width(Length::Fill)
             .style(bg(style::WHITE))
             .into()
@@ -549,7 +550,8 @@ impl Ribb {
         };
 
         let mut stack = Column::new().spacing(8).width(Length::Fill);
-        stack = stack.push(container(media).center_x(Length::Fill));
+        // ebb left-aligns the expanded image (max-w-full, no centering).
+        stack = stack.push(container(media).width(Length::Fill));
 
         // Images collapse on click; SWF (you click to interact with the movie)
         // and the video stub get an explicit Close button — as ebb does for SWF.
