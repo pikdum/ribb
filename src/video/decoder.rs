@@ -11,7 +11,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -50,6 +50,10 @@ pub struct Shared {
     pub eof: AtomicBool,
     /// Clip duration in ms; 0 until known / on open failure.
     pub duration_ms: AtomicI64,
+    /// Bumped by the UI to request a seek to `seek_target_ms` (absolute, in the
+    /// monotonic playback timeline the clock uses).
+    pub seek_gen: AtomicU64,
+    pub seek_target_ms: AtomicI64,
     /// Decoded frames in ascending pts order; UI pops, decoder pushes.
     pub frames: Mutex<VecDeque<RgbaFrame>>,
 }
@@ -62,6 +66,8 @@ impl Shared {
             has_audio: AtomicBool::new(false),
             eof: AtomicBool::new(false),
             duration_ms: AtomicI64::new(0),
+            seek_gen: AtomicU64::new(0),
+            seek_target_ms: AtomicI64::new(0),
             frames: Mutex::new(VecDeque::new()),
         })
     }
@@ -237,9 +243,33 @@ fn run(
 
     // Accumulated pts offset for the current loop pass (see `drain_video`).
     let mut loop_offset: i64 = 0;
+    let mut cur_seek_gen = shared.seek_gen.load(Ordering::Acquire);
     loop {
         if shared.quit.load(Ordering::Acquire) {
             return Ok(());
+        }
+
+        // Handle a requested seek: jump the container, flush decoders, and drop
+        // buffered output so playback resumes at the target. `loop_offset` is set
+        // so post-seek frame pts line up with the rebased clock (target = N*dur+T).
+        let sg = shared.seek_gen.load(Ordering::Acquire);
+        if sg != cur_seek_gen {
+            cur_seek_gen = sg;
+            if duration_ms > 0 {
+                let target = shared.seek_target_ms.load(Ordering::Acquire).max(0);
+                let file_t = target % duration_ms;
+                loop_offset = target - file_t;
+                let _ = ictx.seek(file_t * 1000, ..);
+                v_decoder.flush();
+                if let Some(a) = &mut audio {
+                    a.decoder.flush();
+                }
+                shared.frames.lock().unwrap().clear();
+                if let Some(ring) = &audio_ring {
+                    ring.clear();
+                }
+            }
+            continue;
         }
 
         // Backpressure: only read more once at least one buffer has room.

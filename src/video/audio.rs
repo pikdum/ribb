@@ -6,7 +6,7 @@
 //! Mirrors iced_ruffle's cpal backend, minus ruffle's mixer.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -16,6 +16,9 @@ pub struct AudioRing {
     buf: Mutex<VecDeque<f32>>,
     /// Per-channel sample frames actually played (silence excluded) — the clock.
     samples_played: AtomicU64,
+    /// When set, the callback outputs silence but still drains + advances the
+    /// clock (so muting differs from pausing — a muted video keeps playing).
+    muted: AtomicBool,
     pub channels: u16,
     pub sample_rate: u32,
     /// Backpressure threshold (~1s of interleaved samples).
@@ -26,6 +29,11 @@ impl AudioRing {
     /// Append interleaved samples (called by the decoder).
     pub fn push(&self, samples: &[f32]) {
         self.buf.lock().unwrap().extend(samples.iter().copied());
+    }
+
+    /// Drop all buffered samples (on seek, so stale audio doesn't play).
+    pub fn clear(&self) {
+        self.buf.lock().unwrap().clear();
     }
 
     /// Whether the ring is at capacity (decoder backpressure).
@@ -41,7 +49,7 @@ impl AudioRing {
 
 /// Owns the cpal output stream (kept alive while playing) and the shared ring.
 pub struct AudioOutput {
-    _stream: cpal::Stream,
+    stream: cpal::Stream,
     ring: Arc<AudioRing>,
 }
 
@@ -59,6 +67,7 @@ impl AudioOutput {
         let ring = Arc::new(AudioRing {
             buf: Mutex::new(VecDeque::new()),
             samples_played: AtomicU64::new(0),
+            muted: AtomicBool::new(false),
             channels,
             sample_rate,
             cap: sample_rate as usize * channels as usize,
@@ -96,22 +105,42 @@ impl AudioOutput {
             .ok()?
         };
         stream.play().ok()?;
-        Some(AudioOutput {
-            _stream: stream,
-            ring,
-        })
+        Some(AudioOutput { stream, ring })
     }
 
     pub fn ring(&self) -> Arc<AudioRing> {
         Arc::clone(&self.ring)
     }
 
-    /// Current playback position in ms (per-channel frames / sample rate).
-    pub fn clock_ms(&self) -> i64 {
-        if self.ring.sample_rate == 0 {
-            return 0;
+    /// Per-channel frames played so far (numerator of the playback clock).
+    pub fn frames_played(&self) -> u64 {
+        self.ring.frames_played()
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.ring.sample_rate
+    }
+
+    /// Stop/resume pulling samples (play/pause). Silence-fill stops too, so the
+    /// clock (real frames played) freezes while paused.
+    pub fn set_playing(&self, playing: bool) {
+        let r = if playing {
+            self.stream.play().map_err(|e| e.to_string())
+        } else {
+            self.stream.pause().map_err(|e| e.to_string())
+        };
+        if let Err(e) = r {
+            tracing::warn!("audio stream play/pause failed: {e}");
         }
-        (self.ring.frames_played() * 1000 / self.ring.sample_rate as u64) as i64
+    }
+
+    pub fn set_muted(&self, muted: bool) {
+        self.ring.muted.store(muted, Ordering::Relaxed);
+    }
+
+    /// Drop buffered audio (on seek).
+    pub fn clear(&self) {
+        self.ring.clear();
     }
 }
 
@@ -123,13 +152,16 @@ fn f32_to_i16(s: f32) -> i16 {
 /// On underrun the remainder is silence and the clock does not advance (so the
 /// video, which follows this clock, waits rather than drifting ahead).
 fn fill<T: Copy>(ring: &AudioRing, out: &mut [T], conv: impl Fn(f32) -> T) {
+    let muted = ring.muted.load(Ordering::Relaxed);
     let mut real = 0usize;
     {
         let mut buf = ring.buf.lock().unwrap();
         for slot in out.iter_mut() {
             match buf.pop_front() {
+                // Muted still drains + counts so playback (and the clock) keeps
+                // advancing; it just emits silence.
                 Some(s) => {
-                    *slot = conv(s);
+                    *slot = conv(if muted { 0.0 } else { s });
                     real += 1;
                 }
                 None => *slot = conv(0.0),

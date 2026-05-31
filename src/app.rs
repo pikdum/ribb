@@ -21,8 +21,8 @@ use iced::{
 };
 use iced_ruffle::{Ruffle, RufflePlayer};
 use lucide_icons::iced::{
-    icon_chevron_left, icon_chevron_right, icon_download, icon_external_link, icon_plus,
-    icon_search, icon_settings, icon_x,
+    icon_chevron_left, icon_chevron_right, icon_download, icon_external_link, icon_pause,
+    icon_play, icon_plus, icon_search, icon_settings, icon_volume_2, icon_volume_x, icon_x,
 };
 
 use crate::booru::{
@@ -216,6 +216,13 @@ pub enum Message {
     },
     /// Per-frame tick (from `window::frames`) to advance video playback.
     VideoTick(Instant),
+    /// Video controls (act on the named post's player in the active tab).
+    VideoTogglePlay(String),
+    VideoToggleMute(String),
+    VideoSeek {
+        post_id: String,
+        ms: f32,
+    },
     // Settings
     OpenSettings,
     CloseSettings,
@@ -738,6 +745,24 @@ impl Ribb {
                 // re-runs `view`, which reads the freshly-presented frame.
                 for player in self.tabs[self.active].video.values_mut() {
                     player.tick(now);
+                }
+                Task::none()
+            }
+            Message::VideoTogglePlay(post_id) => {
+                if let Some(player) = self.tabs[self.active].video.get_mut(&post_id) {
+                    player.toggle_playing(Instant::now());
+                }
+                Task::none()
+            }
+            Message::VideoToggleMute(post_id) => {
+                if let Some(player) = self.tabs[self.active].video.get_mut(&post_id) {
+                    player.toggle_muted();
+                }
+                Task::none()
+            }
+            Message::VideoSeek { post_id, ms } => {
+                if let Some(player) = self.tabs[self.active].video.get_mut(&post_id) {
+                    player.seek(ms as i64, Instant::now());
                 }
                 Task::none()
             }

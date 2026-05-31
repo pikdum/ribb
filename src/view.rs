@@ -642,12 +642,16 @@ impl Ribb {
         } else if is_video(&post.file_url) {
             // Size to the video's own dimensions, like images (ebb does the
             // same) — the shader letterboxes within these bounds, so a matched
-            // size means no black bars.
+            // size means no black bars. The controls bar sits flush underneath.
             match tab.video.get(&post.id) {
-                Some(player) if player.has_frame() => iced::widget::shader(player.program())
-                    .width(Length::Fixed(render_w))
-                    .height(Length::Fixed(render_h))
-                    .into(),
+                Some(player) if player.has_frame() => {
+                    let video = iced::widget::shader(player.program())
+                        .width(Length::Fixed(render_w))
+                        .height(Length::Fixed(render_h));
+                    column![video, video_controls(post, player, render_w)]
+                        .width(Length::Fixed(render_w))
+                        .into()
+                }
                 _ => container(text("Loading video…").color(style::BLUE_500))
                     .height(Length::Fixed(render_h))
                     .center_x(Length::Fixed(render_w))
@@ -675,8 +679,9 @@ impl Ribb {
         stack = stack.push(media_container);
 
         // Images collapse on click; SWF (you click to interact with the movie)
-        // and the video stub get an explicit Close button — as ebb does for SWF.
-        if !is_image(&post.file_url) {
+        // gets an explicit Close button — as ebb does. Video has its own X in
+        // the controls bar.
+        if !is_image(&post.file_url) && !is_video(&post.file_url) {
             let close = button(text(format!("Close {}", post.id)).color(style::WHITE))
                 .on_press(Message::TogglePost(post.id.clone()))
                 .style(solid(style::BLUE_500, style::BLUE_600));
@@ -852,6 +857,57 @@ impl Ribb {
         .center_x(Length::Fill)
         .into()
     }
+}
+
+/// The controls bar shown flush under a playing video: play/pause, mute, a seek
+/// slider, and an X to close (the video's replacement for the "Close" button).
+fn video_controls<'a>(post: &BooruPost, player: &Player, width: f32) -> El<'a> {
+    let id = post.id.clone();
+
+    let play_glyph = if player.is_playing() {
+        icon_pause()
+    } else {
+        icon_play()
+    };
+    let play = button(icon_box(play_glyph.size(16).color(style::WHITE), 28.0))
+        .padding(0)
+        .on_press(Message::VideoTogglePlay(id.clone()))
+        .style(ghost);
+
+    let mute_glyph = if player.is_muted() {
+        icon_volume_x()
+    } else {
+        icon_volume_2()
+    };
+    let mute = button(icon_box(mute_glyph.size(16).color(style::WHITE), 28.0))
+        .padding(0)
+        .on_press(Message::VideoToggleMute(id.clone()))
+        .style(ghost);
+
+    let dur = player.duration_ms().max(1) as f32;
+    let pos = (player.position_ms_in_loop() as f32).min(dur);
+    let seek_id = id.clone();
+    let seek = iced::widget::slider(0.0..=dur, pos, move |v| Message::VideoSeek {
+        post_id: seek_id.clone(),
+        ms: v,
+    })
+    .width(Length::Fill);
+
+    let close = button(icon_box(icon_x().size(16).color(style::WHITE), 28.0))
+        .padding(0)
+        .on_press(Message::TogglePost(id.clone()))
+        .style(ghost);
+
+    container(
+        row![play, mute, seek, close]
+            .spacing(8)
+            .align_y(Center)
+            .width(Length::Fill),
+    )
+    .width(Length::Fixed(width))
+    .padding([4, 8])
+    .style(bg(style::GRAY_700))
+    .into()
 }
 
 fn detail_row(label: &str, value: El<'static>) -> El<'static> {
