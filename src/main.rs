@@ -1,5 +1,10 @@
 //! ribb — rust iced booru browser. GUI entry point.
 
+// On Windows, use the GUI subsystem in release builds so launching ribb doesn't
+// pop up a console window. Debug builds keep the console for tracing output.
+// (The attribute only affects Windows targets; it's a no-op elsewhere.)
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 fn main() -> iced::Result {
     tracing_subscriber_init();
     iced::application(
