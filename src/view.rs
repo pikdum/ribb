@@ -774,7 +774,8 @@ impl Ribb {
         let header = row![
             text("Settings").size(20).color(style::BLACK),
             Space::new().width(Length::Fill),
-            button(icon_x().color(style::BLACK))
+            button(icon_box(icon_x().size(16).color(style::BLACK), 28.0))
+                .padding(0)
                 .on_press(Message::CloseSettings)
                 .style(ghost),
         ]
