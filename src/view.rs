@@ -785,6 +785,7 @@ impl Ribb {
                 .size(14)
                 .color(style::GRAY_700),
             text_input("&api_key=YOUR_KEY&user_id=YOUR_ID", &self.settings_draft)
+                .id(SETTINGS_INPUT_ID)
                 .on_input(Message::SettingsDraftChanged)
                 .padding(8),
             text("Format: &api_key=YOUR_KEY&user_id=YOUR_ID")

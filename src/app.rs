@@ -36,6 +36,8 @@ const PAGE_LIMIT: u32 = 100;
 const MAX_FETCH_ATTEMPTS: u32 = 3;
 /// Stable widget id for the search box, so `update` can drive its caret/focus.
 const SEARCH_INPUT_ID: &str = "ribb-search";
+/// Stable widget id for the settings credential input (focused when the modal opens).
+const SETTINGS_INPUT_ID: &str = "ribb-settings";
 const GRID_GAP: f32 = 8.0;
 /// Longest edge (px) thumbnails are downscaled to — small textures, fast decode.
 const THUMB_MAX: u32 = 512;
@@ -289,14 +291,12 @@ impl Ribb {
             }
             Err(_) => Task::none(),
         };
-        // Debug: simulate typing to exercise the autocomplete path. Focus the
-        // box too, so the on_submit (Enter) path is reachable headlessly.
+        // Focus the search box on launch so the user can type immediately (and,
+        // under RIBB_DEBUG_TYPE, so the on_submit/Enter path is reachable).
+        let task = Task::batch([task, iced::widget::operation::focus(SEARCH_INPUT_ID)]);
+        // Debug: simulate typing to exercise the autocomplete path.
         let task = match std::env::var("RIBB_DEBUG_TYPE") {
-            Ok(typed) => Task::batch([
-                task,
-                iced::widget::operation::focus(SEARCH_INPUT_ID),
-                Task::done(Message::QueryChanged(typed)),
-            ]),
+            Ok(typed) => Task::batch([task, Task::done(Message::QueryChanged(typed))]),
             Err(_) => task,
         };
         (app, task)
@@ -382,6 +382,21 @@ impl Ribb {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // Sticky search focus (ebb's auto-focused input): most interactions
+        // blur the search box, since iced focuses whatever widget you click.
+        // After the interactions below we re-assert focus so the user can keep
+        // typing and hit Enter — unless the settings modal is open, which owns
+        // focus while shown.
+        let refocus_search = wants_search_focus(&message);
+        let task = self.dispatch(message);
+        if refocus_search && !self.settings_open {
+            Task::batch([task, iced::widget::operation::focus(SEARCH_INPUT_ID)])
+        } else {
+            task
+        }
+    }
+
+    fn dispatch(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::WindowResized(size) => {
                 self.window = size;
@@ -688,7 +703,7 @@ impl Ribb {
             Message::OpenSettings => {
                 self.settings_draft = self.settings.gelbooru_credentials.clone();
                 self.settings_open = true;
-                Task::none()
+                iced::widget::operation::focus(SETTINGS_INPUT_ID)
             }
             Message::CloseSettings => {
                 self.settings_open = false;
@@ -1088,6 +1103,31 @@ fn grid_cols(width: f32) -> usize {
 /// cells are subtracted — the grid has no outer padding (touches the edges).
 fn grid_cell(width: f32, cols: usize) -> f32 {
     ((width - GRID_GAP * (cols as f32 - 1.0)) / cols as f32).max(80.0)
+}
+
+/// Interactions after which focus should snap back to the search box (ebb's
+/// sticky input). Excludes settings messages (the modal owns focus) and the
+/// high-frequency background messages (image/posts loads, scrolls, typing).
+fn wants_search_focus(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::TogglePost(_)
+            | Message::TagClicked(_)
+            | Message::NextPage
+            | Message::PrevPage
+            | Message::SiteSelected(_)
+            | Message::RatingSelected(_)
+            | Message::NewTab
+            | Message::CloseTab(_)
+            | Message::SelectTab(_)
+            | Message::SwitchTabLeft
+            | Message::SwitchTabRight
+            | Message::SubmitSearch
+            | Message::OpenExternal(_)
+            | Message::DownloadPost { .. }
+            | Message::CloseSettings
+            | Message::SaveSettings
+    )
 }
 
 /// The word currently being typed — the text after the last space. A query
