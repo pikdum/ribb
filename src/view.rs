@@ -640,18 +640,18 @@ impl Ribb {
                     .into(),
             }
         } else if is_video(&post.file_url) {
+            // Size to the video's own dimensions, like images (ebb does the
+            // same) — the shader letterboxes within these bounds, so a matched
+            // size means no black bars.
             match tab.video.get(&post.id) {
-                Some(player) if player.has_frame() => container(
-                    iced::widget::shader(player.program())
-                        .width(Length::Fill)
-                        .height(Length::Fixed(media_h)),
-                )
-                .style(bg(style::BLACK))
-                .into(),
+                Some(player) if player.has_frame() => iced::widget::shader(player.program())
+                    .width(Length::Fixed(render_w))
+                    .height(Length::Fixed(render_h))
+                    .into(),
                 _ => container(text("Loading video…").color(style::BLUE_500))
-                    .height(Length::Fixed(media_h))
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fixed(media_h))
+                    .height(Length::Fixed(render_h))
+                    .center_x(Length::Fixed(render_w))
+                    .center_y(Length::Fixed(render_h))
                     .into(),
             }
         } else {
