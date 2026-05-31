@@ -104,6 +104,21 @@
           fi
         '';
 
+        # A freedesktop .desktop entry so the native build shows up in app
+        # launchers (and can be installed via a NixOS config). No icon ships in
+        # the repo, so fall back to a stock freedesktop icon name.
+        desktopItem = pkgs.makeDesktopItem {
+          name = "ribb";
+          desktopName = "ribb";
+          comment = "rust iced booru browser";
+          exec = "ribb";
+          icon = "applications-internet";
+          categories = [
+            "Graphics"
+            "Viewer"
+          ];
+        };
+
         ribb = rustPlatform.buildRustPackage {
           pname = "ribb";
           version = "0.1.0";
@@ -124,7 +139,11 @@
             # Ruffle's build script compiles the AVM2 playerglobal with a JDK.
             pkgs.jdk
             pkgs.makeWrapper
+            # Installs desktopItem into $out/share/applications via postInstall.
+            pkgs.copyDesktopItems
           ];
+
+          desktopItems = [ desktopItem ];
           buildInputs = [
             pkgs.ffmpeg-full
             pkgs.alsa-lib
