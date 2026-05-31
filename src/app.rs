@@ -34,6 +34,8 @@ use crate::style;
 
 const PAGE_LIMIT: u32 = 100;
 const MAX_FETCH_ATTEMPTS: u32 = 3;
+/// Stable widget id for the search box, so `update` can drive its caret/focus.
+const SEARCH_INPUT_ID: &str = "ribb-search";
 const GRID_GAP: f32 = 8.0;
 /// Longest edge (px) thumbnails are downscaled to — small textures, fast decode.
 const THUMB_MAX: u32 = 512;
@@ -100,6 +102,8 @@ struct Tab {
     error: Option<String>,
     /// Live tag suggestions for the last word being typed.
     autocomplete: Vec<BooruTag>,
+    /// Keyboard-highlighted suggestion (downshift-style); `None` = no highlight.
+    autocomplete_index: Option<usize>,
     /// Bumped on every fresh fetch so stale responses can be discarded.
     generation: u64,
     /// Loaded Flash players, keyed by post ID.
@@ -131,6 +135,7 @@ impl Tab {
             loading: false,
             error: None,
             autocomplete: Vec::new(),
+            autocomplete_index: None,
             generation: 0,
             swf: HashMap::new(),
             scroll_id: Id::unique(),
@@ -154,6 +159,9 @@ pub enum Message {
     // Search / filters (act on the active tab)
     QueryChanged(String),
     SubmitSearch,
+    /// Enter pressed in the search box: apply the highlighted suggestion if
+    /// one is selected, otherwise submit the search.
+    SearchEnter,
     NextPage,
     PrevPage,
     SiteSelected(Site),
@@ -281,9 +289,14 @@ impl Ribb {
             }
             Err(_) => Task::none(),
         };
-        // Debug: simulate typing to exercise the autocomplete path.
+        // Debug: simulate typing to exercise the autocomplete path. Focus the
+        // box too, so the on_submit (Enter) path is reachable headlessly.
         let task = match std::env::var("RIBB_DEBUG_TYPE") {
-            Ok(typed) => Task::batch([task, Task::done(Message::QueryChanged(typed))]),
+            Ok(typed) => Task::batch([
+                task,
+                iced::widget::operation::focus(SEARCH_INPUT_ID),
+                Task::done(Message::QueryChanged(typed)),
+            ]),
             Err(_) => task,
         };
         (app, task)
@@ -322,6 +335,37 @@ impl Ribb {
         let Event::KeyPressed { key, modifiers, .. } = event else {
             return Task::none();
         };
+
+        // Downshift-style autocomplete navigation: plain (un-modified) Up/Down
+        // cycle the highlight, Escape dismisses. Only while the dropdown shows,
+        // so it never shadows browsing or the Ctrl shortcuts below.
+        if !modifiers.control() && !self.tabs[self.active].autocomplete.is_empty() {
+            let len = self.tabs[self.active].autocomplete.len();
+            let tab = &mut self.tabs[self.active];
+            match key.as_ref() {
+                Key::Named(Named::ArrowDown) => {
+                    tab.autocomplete_index = Some(match tab.autocomplete_index {
+                        None => 0,
+                        Some(i) => (i + 1) % len,
+                    });
+                    return Task::none();
+                }
+                Key::Named(Named::ArrowUp) => {
+                    tab.autocomplete_index = Some(match tab.autocomplete_index {
+                        None => len - 1,
+                        Some(i) => (i + len - 1) % len,
+                    });
+                    return Task::none();
+                }
+                Key::Named(Named::Escape) => {
+                    tab.autocomplete.clear();
+                    tab.autocomplete_index = None;
+                    return Task::none();
+                }
+                _ => {}
+            }
+        }
+
         if !modifiers.control() {
             return Task::none();
         }
@@ -422,6 +466,8 @@ impl Ribb {
             Message::QueryChanged(value) => {
                 let tab = &mut self.tabs[self.active];
                 tab.temp_query = value.clone();
+                // The suggestion set is about to change; drop any highlight.
+                tab.autocomplete_index = None;
                 // Autocomplete the last word being typed (ebb completes the
                 // word under the caret). A trailing space means "no word".
                 let word = last_word(&value);
@@ -445,10 +491,16 @@ impl Ribb {
                 tags,
             } => {
                 if let Some(idx) = self.tab_index(tab) {
-                    // Ignore stale responses for a word no longer being typed.
-                    if last_word(&self.tabs[idx].temp_query) == query_word {
+                    let t = &self.tabs[idx];
+                    // Drop the response if the word being completed has moved on,
+                    // or if this query was already submitted verbatim — a slow
+                    // reply would otherwise re-open the dropdown after a search.
+                    let accept = last_word(&t.temp_query) == query_word
+                        && t.query.as_deref() != Some(t.temp_query.as_str());
+                    if accept {
                         tracing::debug!(word = %query_word, count = tags.len(), "autocomplete");
                         self.tabs[idx].autocomplete = tags;
+                        self.tabs[idx].autocomplete_index = None;
                     }
                 }
                 Task::none()
@@ -470,7 +522,28 @@ impl Ribb {
                 tab.page = 0;
                 tab.scroll_y = 0.0;
                 tab.autocomplete.clear();
-                Task::batch([self.scroll_active_to_top(), self.fetch_tab(self.active)])
+                tab.autocomplete_index = None;
+                Task::batch([
+                    self.scroll_active_to_top(),
+                    self.fetch_tab(self.active),
+                    // Keep the caret at the end of the now-inserted tag (and
+                    // refocus when the selection came from a click).
+                    iced::widget::operation::focus(SEARCH_INPUT_ID),
+                    iced::widget::operation::move_cursor_to_end(SEARCH_INPUT_ID),
+                ])
+            }
+            Message::SearchEnter => {
+                // Apply the highlighted suggestion if one is selected, else
+                // submit the search as-typed.
+                let tab = &self.tabs[self.active];
+                let selected = tab
+                    .autocomplete_index
+                    .and_then(|i| tab.autocomplete.get(i))
+                    .map(|t| t.value.clone());
+                match selected {
+                    Some(value) => self.update(Message::AutocompleteSelected(value)),
+                    None => self.update(Message::SubmitSearch),
+                }
             }
             Message::SubmitSearch => {
                 let tab = &mut self.tabs[self.active];
@@ -483,6 +556,7 @@ impl Ribb {
                 tab.page = 0;
                 tab.scroll_y = 0.0;
                 tab.autocomplete.clear();
+                tab.autocomplete_index = None;
                 Task::batch([self.scroll_active_to_top(), self.fetch_tab(self.active)])
             }
             Message::NextPage => {

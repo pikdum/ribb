@@ -378,8 +378,9 @@ impl Ribb {
 
     fn header<'a>(&'a self, tab: &'a Tab) -> El<'a> {
         let input = text_input("search tags…", &tab.temp_query)
+            .id(SEARCH_INPUT_ID)
             .on_input(Message::QueryChanged)
-            .on_submit(Message::SubmitSearch)
+            .on_submit(Message::SearchEnter)
             .padding(8)
             .width(Length::Fill);
         let submit = button(icon_search().size(18).color(style::WHITE))
@@ -434,7 +435,8 @@ impl Ribb {
     /// Live tag suggestions for the word being typed (ebb's SearchInput dropdown).
     fn autocomplete_list(&self, tab: &Tab) -> El<'static> {
         let mut list = Column::new().spacing(2);
-        for tag in &tab.autocomplete {
+        for (i, tag) in tab.autocomplete.iter().enumerate() {
+            let highlighted = tab.autocomplete_index == Some(i);
             let count = tag
                 .post_count
                 .map(format_count)
@@ -449,13 +451,14 @@ impl Ribb {
                 button(entry)
                     .on_press(Message::AutocompleteSelected(tag.value.clone()))
                     .width(Length::Fill)
-                    .style(|_theme, status| {
-                        let background = matches!(
+                    .style(move |_theme, status| {
+                        let hovered = matches!(
                             status,
                             iced::widget::button::Status::Hovered
                                 | iced::widget::button::Status::Pressed
-                        )
-                        .then(|| style::GRAY_100.into());
+                        );
+                        let background =
+                            (highlighted || hovered).then(|| style::GRAY_100.into());
                         iced::widget::button::Style {
                             background,
                             text_color: style::BLACK,
