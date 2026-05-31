@@ -291,7 +291,11 @@ impl Ribb {
         }
 
         scrollable(body)
-            .id(self.scroll_id.clone())
+            .id(tab.scroll_id.clone())
+            .on_scroll(|viewport| Message::ScrollChanged {
+                tab: tab.id,
+                y: viewport.absolute_offset().y,
+            })
             .width(Length::Fill)
             .height(Length::Fill)
             .into()

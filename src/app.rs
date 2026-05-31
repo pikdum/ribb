@@ -66,13 +66,13 @@ pub struct Ribb {
     images: ImageCache,
     /// Caps concurrent image fetch/decode jobs (shared by all fetch Tasks).
     image_sem: Arc<tokio::sync::Semaphore>,
-    /// Id of the content scrollable, so we can scroll to an expanded post.
-    scroll_id: Id,
     /// Id attached to the image of the post we want to center; an operation
     /// reads its laid-out bounds to compute the exact scroll offset.
     anchor_id: Id,
     /// Post id currently carrying `anchor_id` (the one to scroll to).
     scroll_anchor: Option<String>,
+    /// Tab whose saved scroll offset is about to be restored after activation.
+    pending_scroll_restore: Option<u64>,
     /// Tag currently hovered in a detail view (its "open in new tab" + shows).
     hovered_tag: Option<String>,
     /// Exact content-area (scroll viewport) size, measured by the view's
@@ -103,6 +103,10 @@ struct Tab {
     generation: u64,
     /// Loaded Flash players, keyed by post ID.
     swf: HashMap<String, RufflePlayer>,
+    /// Id of this tab's content scrollable.
+    scroll_id: Id,
+    /// Last observed vertical scroll offset for this tab.
+    scroll_y: f32,
 }
 
 impl Tab {
@@ -128,6 +132,8 @@ impl Tab {
             autocomplete: Vec::new(),
             generation: 0,
             swf: HashMap::new(),
+            scroll_id: Id::unique(),
+            scroll_y: 0.0,
         }
     }
 }
@@ -191,8 +197,21 @@ pub enum Message {
     // Window / input
     WindowResized(Size),
     Key(iced::keyboard::Event),
+    /// Current vertical scroll offset for a tab.
+    ScrollChanged {
+        tab: u64,
+        y: f32,
+    },
+    /// Restore a tab's saved scroll offset after it becomes visible.
+    RestoreScroll {
+        tab: u64,
+        y: f32,
+    },
     /// Computed scroll offset (content-space y) to center an expanded post.
-    ScrollComputed(f32),
+    ScrollComputed {
+        tab: u64,
+        y: f32,
+    },
 }
 
 /// A rating choice in the selector, including the "All Content" (`None`) option.
@@ -228,9 +247,9 @@ impl Ribb {
             next_tab_id: 1,
             images: ImageCache::default(),
             image_sem: Arc::new(tokio::sync::Semaphore::new(IMAGE_CONCURRENCY)),
-            scroll_id: Id::unique(),
             anchor_id: Id::unique(),
             scroll_anchor: None,
+            pending_scroll_restore: None,
             hovered_tag: None,
             viewport: Cell::new(Size::new(1100.0, 700.0)),
             window: Size::new(1100.0, 800.0),
@@ -311,16 +330,40 @@ impl Ribb {
             }
             Message::Key(event) => self.handle_key(event),
             Message::Noop => Task::none(),
-            Message::ScrollComputed(y) => iced::widget::operation::scroll_to(
-                self.scroll_id.clone(),
-                iced::widget::scrollable::AbsoluteOffset { x: 0.0, y },
-            ),
+            Message::ScrollChanged { tab, y } => {
+                if self.pending_scroll_restore == Some(tab) {
+                    return Task::none();
+                }
+                if let Some(idx) = self.tab_index(tab) {
+                    self.tabs[idx].scroll_y = y;
+                }
+                Task::none()
+            }
+            Message::RestoreScroll { tab, y } => {
+                if self.pending_scroll_restore == Some(tab) {
+                    self.pending_scroll_restore = None;
+                }
+                self.tab_index(tab)
+                    .map(|idx| {
+                        self.tabs[idx].scroll_y = y;
+                        self.scroll_tab_to(idx, y)
+                    })
+                    .unwrap_or_else(Task::none)
+            }
+            Message::ScrollComputed { tab, y } => self
+                .tab_index(tab)
+                .map(|idx| {
+                    self.tabs[idx].scroll_y = y;
+                    self.scroll_tab_to(idx, y)
+                })
+                .unwrap_or_else(Task::none),
 
             // --- Tabs ---------------------------------------------------
             Message::NewTab => self.push_tab(None, true),
             Message::SelectTab(idx) => {
                 if idx < self.tabs.len() {
                     self.active = idx;
+                    return self.defer_tab_restore(idx);
                 }
                 Task::none()
             }
@@ -337,6 +380,7 @@ impl Ribb {
                     } else if idx < self.active || (idx == self.active && idx > 0) {
                         self.active = self.active.saturating_sub(1);
                     }
+                    return self.defer_active_restore();
                 }
                 Task::none()
             }
@@ -347,12 +391,14 @@ impl Ribb {
                     } else {
                         self.active - 1
                     };
+                    return self.defer_active_restore();
                 }
                 Task::none()
             }
             Message::SwitchTabRight => {
                 if self.tabs.len() > 1 {
                     self.active = (self.active + 1) % self.tabs.len();
+                    return self.defer_active_restore();
                 }
                 Task::none()
             }
@@ -407,8 +453,9 @@ impl Ribb {
                     combined
                 };
                 tab.page = 0;
+                tab.scroll_y = 0.0;
                 tab.autocomplete.clear();
-                self.fetch_tab(self.active)
+                Task::batch([self.scroll_active_to_top(), self.fetch_tab(self.active)])
             }
             Message::SubmitSearch => {
                 let tab = &mut self.tabs[self.active];
@@ -419,14 +466,16 @@ impl Ribb {
                     tab.temp_query.clone()
                 };
                 tab.page = 0;
+                tab.scroll_y = 0.0;
                 tab.autocomplete.clear();
-                self.fetch_tab(self.active)
+                Task::batch([self.scroll_active_to_top(), self.fetch_tab(self.active)])
             }
             Message::NextPage => {
                 let tab = &mut self.tabs[self.active];
                 if tab.has_next_page {
                     tab.page += 1;
-                    return self.fetch_tab(self.active);
+                    tab.scroll_y = 0.0;
+                    return Task::batch([self.scroll_active_to_top(), self.fetch_tab(self.active)]);
                 }
                 Task::none()
             }
@@ -434,7 +483,8 @@ impl Ribb {
                 let tab = &mut self.tabs[self.active];
                 if tab.page > 0 {
                     tab.page -= 1;
-                    return self.fetch_tab(self.active);
+                    tab.scroll_y = 0.0;
+                    return Task::batch([self.scroll_active_to_top(), self.fetch_tab(self.active)]);
                 }
                 Task::none()
             }
@@ -442,11 +492,14 @@ impl Ribb {
                 let tab = &mut self.tabs[self.active];
                 tab.site = site;
                 tab.page = 0;
-                self.fetch_tab(self.active)
+                tab.scroll_y = 0.0;
+                Task::batch([self.scroll_active_to_top(), self.fetch_tab(self.active)])
             }
             Message::RatingSelected(choice) => {
-                self.tabs[self.active].rating = choice.0;
-                self.fetch_tab(self.active)
+                let tab = &mut self.tabs[self.active];
+                tab.rating = choice.0;
+                tab.scroll_y = 0.0;
+                Task::batch([self.scroll_active_to_top(), self.fetch_tab(self.active)])
             }
 
             // --- Results -----------------------------------------------
@@ -564,10 +617,15 @@ impl Ribb {
         if activate {
             self.active = new_idx;
         }
-        if has_query {
+        let fetch = if has_query {
             self.fetch_tab(new_idx)
         } else {
             Task::none()
+        };
+        if activate {
+            Task::batch([fetch, self.defer_tab_restore(new_idx)])
+        } else {
+            fetch
         }
     }
 
@@ -683,6 +741,28 @@ impl Ribb {
         }
     }
 
+    fn scroll_active_to_top(&self) -> Task<Message> {
+        self.scroll_tab_to(self.active, 0.0)
+    }
+
+    fn defer_active_restore(&mut self) -> Task<Message> {
+        self.defer_tab_restore(self.active)
+    }
+
+    fn defer_tab_restore(&mut self, idx: usize) -> Task<Message> {
+        let tab = self.tabs[idx].id;
+        let y = self.tabs[idx].scroll_y;
+        self.pending_scroll_restore = Some(tab);
+        Task::perform(async move {}, move |_| Message::RestoreScroll { tab, y })
+    }
+
+    fn scroll_tab_to(&self, idx: usize, y: f32) -> Task<Message> {
+        iced::widget::operation::scroll_to(
+            self.tabs[idx].scroll_id.clone(),
+            iced::widget::scrollable::AbsoluteOffset { x: 0.0, y },
+        )
+    }
+
     /// Expand/collapse a post in the active tab, loading media as needed.
     fn toggle_post(&mut self, post_id: String) -> Task<Message> {
         let idx = self.active;
@@ -698,6 +778,7 @@ impl Ribb {
             return Task::none();
         };
         let tab_id = tab.id;
+        let scroll_id = tab.scroll_id.clone();
         let mut tasks = Vec::new();
 
         // Resolve category-grouped tags (inline for most providers; a fetch for
@@ -743,11 +824,8 @@ impl Ribb {
         // scroll to center it (exact for any number of expanded posts).
         self.scroll_anchor = Some(post.id.clone());
         tasks.push(
-            iced::advanced::widget::operate(CenterOnAnchor::new(
-                self.anchor_id.clone(),
-                self.scroll_id.clone(),
-            ))
-            .map(Message::ScrollComputed),
+            iced::advanced::widget::operate(CenterOnAnchor::new(self.anchor_id.clone(), scroll_id))
+                .map(move |y| Message::ScrollComputed { tab: tab_id, y }),
         );
         Task::batch(tasks)
     }
