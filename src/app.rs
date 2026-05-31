@@ -1173,7 +1173,7 @@ fn download_filename(post_id: &str, url: &str) -> String {
         })
         .filter(|ext| !ext.is_empty())
         .unwrap_or_else(|| "bin".to_string());
-    format!("ribb-{post_id}.{extension}")
+    format!("{post_id}.{extension}")
 }
 
 fn sanitize_extension(ext: &str) -> String {
@@ -1254,8 +1254,8 @@ mod tests {
     fn download_filename_uses_post_id_and_url_extension() {
         assert_eq!(
             download_filename("14182743", "https://img.example/post/file.jpeg?download=1"),
-            "ribb-14182743.jpeg"
+            "14182743.jpeg"
         );
-        assert_eq!(download_filename("42", "not a url"), "ribb-42.bin");
+        assert_eq!(download_filename("42", "not a url"), "42.bin");
     }
 }
