@@ -40,6 +40,40 @@ fn ghost(_theme: &Theme, status: iced::widget::button::Status) -> iced::widget::
     }
 }
 
+fn active_tab_label(
+    _theme: &Theme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    let background = match status {
+        iced::widget::button::Status::Pressed => Some(style::INDIGO_600.into()),
+        _ => None,
+    };
+    iced::widget::button::Style {
+        background,
+        text_color: style::WHITE,
+        border: iced::border::rounded(6.0),
+        ..iced::widget::button::Style::default()
+    }
+}
+
+fn active_tab_close(
+    _theme: &Theme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    let background = match status {
+        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
+            Some(style::INDIGO_600.into())
+        }
+        _ => None,
+    };
+    iced::widget::button::Style {
+        background,
+        text_color: style::WHITE,
+        border: iced::border::rounded(999.0),
+        ..iced::widget::button::Style::default()
+    }
+}
+
 /// A solid colored pill button (fully rounded), with a hover/pressed shade.
 fn pill(
     bg: Color,
@@ -208,28 +242,49 @@ impl Ribb {
         let mut bar = Row::new().spacing(8).align_y(Center);
         for (i, tab) in self.tabs.iter().enumerate() {
             let active = i == self.active;
-            let (fill, hover) = if active {
-                (style::INDIGO_500, style::INDIGO_600)
-            } else {
-                (style::GRAY_300, style::GRAY_300)
-            };
-            let mut chip = Row::new().spacing(2).align_y(Center).push(
-                button(
-                    text(tab.title.clone())
-                        .size(13)
-                        .color(if active { style::WHITE } else { style::BLACK }),
-                )
-                .on_press(Message::SelectTab(i))
-                .style(solid(fill, hover)),
-            );
             if active && self.tabs.len() > 1 {
-                chip = chip.push(
-                    button(icon_x().size(13).color(style::WHITE))
+                let chip = row![
+                    button(text(tab.title.clone()).size(13).color(style::WHITE))
+                        .padding(iced::Padding {
+                            top: 5.0,
+                            right: 4.0,
+                            bottom: 5.0,
+                            left: 8.0,
+                        })
+                        .on_press(Message::SelectTab(i))
+                        .style(active_tab_label),
+                    button(
+                        container(icon_x().size(13).color(style::WHITE))
+                            .center_x(Length::Fixed(20.0))
+                            .center_y(Length::Fixed(20.0)),
+                    )
+                    .padding(0)
+                    .width(Length::Fixed(20.0))
+                    .height(Length::Fixed(20.0))
                         .on_press(Message::CloseTab(tab.id))
-                        .style(solid(style::INDIGO_500, style::INDIGO_600)),
+                        .style(active_tab_close),
+                    Space::new().width(Length::Fixed(4.0)),
+                ]
+                .spacing(0)
+                .align_y(Center);
+                bar = bar.push(container(chip).style(rounded_bg(style::INDIGO_500, 6.0)));
+            } else {
+                let (fill, hover) = if active {
+                    (style::INDIGO_500, style::INDIGO_600)
+                } else {
+                    (style::GRAY_300, style::GRAY_300)
+                };
+                bar = bar.push(
+                    button(
+                        text(tab.title.clone())
+                            .size(13)
+                            .color(if active { style::WHITE } else { style::BLACK }),
+                    )
+                    .padding([5, 10])
+                    .on_press(Message::SelectTab(i))
+                    .style(solid(fill, hover)),
                 );
             }
-            bar = bar.push(chip);
         }
         bar = bar
             .push(button(icon_plus().size(16)).on_press(Message::NewTab).style(ghost))
