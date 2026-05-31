@@ -25,6 +25,17 @@ fn solid(
 }
 
 /// A borderless, transparent button (icons in the tab bar).
+/// Center an icon in a fixed square box so a fully-rounded (`ghost`) button
+/// renders as a true circle regardless of the glyph's advance width.
+fn icon_box<'a>(content: impl Into<El<'a>>, diameter: f32) -> El<'a> {
+    container(content)
+        .width(diameter)
+        .height(diameter)
+        .align_x(Center)
+        .align_y(Center)
+        .into()
+}
+
 fn ghost(_theme: &Theme, status: iced::widget::button::Status) -> iced::widget::button::Style {
     let background = match status {
         iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
@@ -288,19 +299,18 @@ impl Ribb {
         }
         bar = bar
             .push(
-                button(
-                    container(icon_plus().size(16))
-                        .center_x(Length::Fill)
-                        .center_y(Length::Fill),
-                )
-                    .width(28)
-                    .height(28)
+                button(icon_box(icon_plus().size(16), 28.0))
                     .padding(0)
                     .on_press(Message::NewTab)
                     .style(ghost),
             )
             .push(Space::new().width(Length::Fill))
-            .push(button(icon_settings().size(16)).on_press(Message::OpenSettings).style(ghost));
+            .push(
+                button(icon_box(icon_settings().size(16), 28.0))
+                    .padding(0)
+                    .on_press(Message::OpenSettings)
+                    .style(ghost),
+            );
 
         container(bar)
             .padding(8)
@@ -376,11 +386,13 @@ impl Ribb {
             .on_press(Message::SubmitSearch)
             .style(solid(style::BLUE_500, style::BLUE_600));
 
-        let prev = button(icon_chevron_left().size(20))
+        let prev = button(icon_box(icon_chevron_left().size(20), 32.0))
+            .padding(0)
             .on_press_maybe((tab.page > 0).then_some(Message::PrevPage))
             .style(ghost);
         let page_no = text(format!("Page {}", tab.page + 1)).size(17);
-        let next = button(icon_chevron_right().size(20))
+        let next = button(icon_box(icon_chevron_right().size(20), 32.0))
+            .padding(0)
             .on_press_maybe(tab.has_next_page.then_some(Message::NextPage))
             .style(ghost);
         let pager = row![prev, page_no, next].spacing(6).align_y(Center);
