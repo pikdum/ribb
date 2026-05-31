@@ -553,6 +553,7 @@ impl Ribb {
         };
         mouse_area(inner)
             .on_press(Message::TogglePost(post.id.clone()))
+            .interaction(iced::mouse::Interaction::Pointer)
             .into()
     }
 
@@ -583,6 +584,7 @@ impl Ribb {
                 .style(bg(style::GRAY_200)),
         )
         .on_press(Message::NextPage)
+        .interaction(iced::mouse::Interaction::Pointer)
         .into()
     }
 
@@ -609,6 +611,7 @@ impl Ribb {
                         .height(Length::Fixed(render_h)),
                 )
                 .on_press(Message::TogglePost(post.id.clone()))
+                .interaction(iced::mouse::Interaction::Pointer)
                 .into(),
                 Some(ImageState::Failed) => container(text("Failed to load image."))
                     .height(Length::Fixed(240.0))
