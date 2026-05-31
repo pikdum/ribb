@@ -8,6 +8,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use iced::advanced::widget::{operation, Id};
 use iced::widget::{
@@ -31,6 +32,7 @@ use crate::booru::{
 use crate::cache::{fetch_bytes, fetch_image, DecodedImage, ImageCache, ImageKind, ImageState};
 use crate::settings::Settings;
 use crate::style;
+use crate::video::Player;
 
 const PAGE_LIMIT: u32 = 100;
 const MAX_FETCH_ATTEMPTS: u32 = 3;
@@ -110,6 +112,8 @@ struct Tab {
     generation: u64,
     /// Loaded Flash players, keyed by post ID.
     swf: HashMap<String, RufflePlayer>,
+    /// Loaded video players (ffmpeg-backed), keyed by post ID.
+    video: HashMap<String, Player>,
     /// Id of this tab's content scrollable.
     scroll_id: Id,
     /// Last observed vertical scroll offset for this tab.
@@ -140,6 +144,7 @@ impl Tab {
             autocomplete_index: None,
             generation: 0,
             swf: HashMap::new(),
+            video: HashMap::new(),
             scroll_id: Id::unique(),
             scroll_y: 0.0,
         }
@@ -204,6 +209,13 @@ pub enum Message {
         post_id: String,
         bytes: Option<Vec<u8>>,
     },
+    VideoLoaded {
+        tab: u64,
+        post_id: String,
+        bytes: Option<Vec<u8>>,
+    },
+    /// Per-frame tick (from `window::frames`) to advance video playback.
+    VideoTick(Instant),
     // Settings
     OpenSettings,
     CloseSettings,
@@ -317,7 +329,12 @@ impl Ribb {
     pub fn subscription(&self) -> Subscription<Message> {
         let keys = iced::keyboard::listen().map(Message::Key);
         let resizes = iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size));
-        Subscription::batch([keys, resizes])
+        let mut subs = vec![keys, resizes];
+        // Only drive per-frame redraws while the visible tab is playing a video.
+        if !self.tabs[self.active].video.is_empty() {
+            subs.push(iced::window::frames().map(Message::VideoTick));
+        }
+        Subscription::batch(subs)
     }
 
     /// Translate a Ctrl-modified key press into a tab action (ebb's shortcuts).
@@ -698,6 +715,32 @@ impl Ribb {
                 }
                 Task::none()
             }
+            Message::VideoLoaded {
+                tab,
+                post_id,
+                bytes,
+            } => {
+                if let Some(bytes) = bytes {
+                    match Player::from_bytes(&bytes) {
+                        Ok(player) => {
+                            tracing::info!(post = %post_id, "video player ready");
+                            if let Some(idx) = self.tab_index(tab) {
+                                self.tabs[idx].video.insert(post_id, player);
+                            }
+                        }
+                        Err(e) => tracing::warn!("failed to start video {post_id}: {e}"),
+                    }
+                }
+                Task::none()
+            }
+            Message::VideoTick(now) => {
+                // Advance the active tab's videos; the redraw after this message
+                // re-runs `view`, which reads the freshly-presented frame.
+                for player in self.tabs[self.active].video.values_mut() {
+                    player.tick(now);
+                }
+                Task::none()
+            }
 
             // --- Settings ----------------------------------------------
             Message::OpenSettings => {
@@ -806,6 +849,7 @@ impl Ribb {
                 tab.has_next_page = page.has_next_page;
                 tab.selected.clear();
                 tab.swf.clear();
+                tab.video.clear();
                 tab.loading = false;
                 tab.error = if tab.posts.is_empty() {
                     Some("No results found.".to_string())
@@ -854,6 +898,7 @@ impl Ribb {
                     tab.posts.clear();
                     tab.selected.clear();
                     tab.swf.clear();
+                    tab.video.clear();
                     tab.has_next_page = false;
                     tab.loading = false;
                     tab.error = Some(msg);
@@ -892,6 +937,7 @@ impl Ribb {
         if let Some(pos) = tab.selected.iter().position(|id| id == &post_id) {
             tab.selected.remove(pos);
             tab.swf.remove(&post_id);
+            tab.video.remove(&post_id);
             return Task::none();
         }
         tab.selected.push(post_id.clone());
@@ -934,6 +980,19 @@ impl Ribb {
             tasks.push(Task::perform(
                 async move { fetch_bytes(http, url).await },
                 move |(_url, bytes)| Message::SwfLoaded {
+                    tab: tab_id,
+                    post_id: post_id.clone(),
+                    bytes,
+                },
+            ));
+        } else if is_video(&post.file_url) && !self.tabs[idx].video.contains_key(&post_id) {
+            // Fetch with our own client (booru CDNs reject ffmpeg's default HTTP
+            // headers; Gelbooru needs a Referer), then decode from a temp file.
+            let http = self.client.http().clone();
+            let url = post.file_url.clone();
+            tasks.push(Task::perform(
+                async move { fetch_bytes(http, url).await },
+                move |(_url, bytes)| Message::VideoLoaded {
                     tab: tab_id,
                     post_id: post_id.clone(),
                     bytes,

@@ -52,6 +52,15 @@ image = { version = "0.25", default-features = false, features = [
     "webp",
 ] }
 lucide-icons = { version = "1.17.0", features = ["iced"] }
+# Video playback: ffmpeg-next decodes to RGBA (video) + f32 (audio); cpal plays
+# the audio; bytemuck feeds the wgpu shader uniform; tempfile backs ffmpeg's
+# file input (we fetch bytes with our own client to satisfy CDN hotlink headers).
+ffmpeg-next = "8.1"
+cpal = "0.16"
+bytemuck = "1"
+tempfile = "3"
+# Same wgpu as iced 0.14 (unifies to one instance) for the custom video shader.
+wgpu = "27"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

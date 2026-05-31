@@ -8,3 +8,4 @@ pub mod booru;
 pub mod cache;
 pub mod settings;
 pub mod style;
+pub mod video;

@@ -640,16 +640,20 @@ impl Ribb {
                     .into(),
             }
         } else if is_video(&post.file_url) {
-            // Video playback is intentionally not implemented in this build.
-            column![
-                text("Video playback is not supported in this build."),
-                button(text("Open externally").color(style::WHITE))
-                    .on_press(Message::OpenExternal(post.file_url.clone()))
-                    .style(solid(style::BLUE_500, style::BLUE_600)),
-            ]
-            .spacing(8)
-            .align_x(Center)
-            .into()
+            match tab.video.get(&post.id) {
+                Some(player) if player.has_frame() => container(
+                    iced::widget::shader(player.program())
+                        .width(Length::Fill)
+                        .height(Length::Fixed(media_h)),
+                )
+                .style(bg(style::BLACK))
+                .into(),
+                _ => container(text("Loading video…").color(style::BLUE_500))
+                    .height(Length::Fixed(media_h))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fixed(media_h))
+                    .into(),
+            }
         } else {
             column![
                 text("Unknown file type"),
