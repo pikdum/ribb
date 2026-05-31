@@ -287,7 +287,18 @@ impl Ribb {
             }
         }
         bar = bar
-            .push(button(icon_plus().size(16)).on_press(Message::NewTab).style(ghost))
+            .push(
+                button(
+                    container(icon_plus().size(16))
+                        .center_x(Length::Fill)
+                        .center_y(Length::Fill),
+                )
+                    .width(28)
+                    .height(28)
+                    .padding(0)
+                    .on_press(Message::NewTab)
+                    .style(ghost),
+            )
             .push(Space::new().width(Length::Fill))
             .push(button(icon_settings().size(16)).on_press(Message::OpenSettings).style(ghost));
 
