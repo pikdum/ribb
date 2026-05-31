@@ -626,13 +626,20 @@ impl Ribb {
             }
         } else if is_swf(&post.file_url) {
             match tab.swf.get(&post.id) {
-                Some(player) => container(
-                    Ruffle::new(player)
+                Some(player) => {
+                    let movie = container(
+                        Ruffle::new(player)
+                            .width(Length::Fill)
+                            .height(Length::Fixed(media_h)),
+                    )
+                    .style(bg(style::BLACK));
+                    // A square close button flush under the movie (SWF has no
+                    // other controls), centered.
+                    column![movie, swf_close(post)]
                         .width(Length::Fill)
-                        .height(Length::Fixed(media_h)),
-                )
-                .style(bg(style::BLACK))
-                .into(),
+                        .align_x(Center)
+                        .into()
+                }
                 None => container(text("Loading Flash…").color(style::BLUE_500))
                     .height(Length::Fixed(media_h))
                     .center_x(Length::Fill)
@@ -678,10 +685,10 @@ impl Ribb {
         }
         stack = stack.push(media_container);
 
-        // Images collapse on click; SWF (you click to interact with the movie)
-        // gets an explicit Close button — as ebb does. Video has its own X in
-        // the controls bar.
-        if !is_image(&post.file_url) && !is_video(&post.file_url) {
+        // Images collapse on click. SWF and video carry their own close button
+        // flush under the media (square X / controls bar). Anything else (an
+        // unknown type) still gets the explicit fallback Close button.
+        if !is_image(&post.file_url) && !is_video(&post.file_url) && !is_swf(&post.file_url) {
             let close = button(text(format!("Close {}", post.id)).color(style::WHITE))
                 .on_press(Message::TogglePost(post.id.clone()))
                 .style(solid(style::BLUE_500, style::BLUE_600));
@@ -857,6 +864,30 @@ impl Ribb {
         .center_x(Length::Fill)
         .into()
     }
+}
+
+/// A square close button flush under an SWF movie (its only control), styled
+/// like the X in the video controls bar.
+fn swf_close<'a>(post: &BooruPost) -> El<'a> {
+    button(icon_box(icon_x().size(18).color(style::WHITE), 32.0))
+        .padding(0)
+        .on_press(Message::TogglePost(post.id.clone()))
+        .style(|_theme, status| {
+            let bg = match status {
+                iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
+                    style::GRAY_600
+                }
+                _ => style::GRAY_700,
+            };
+            iced::widget::button::Style {
+                background: Some(bg.into()),
+                text_color: style::WHITE,
+                // A sharp square, not the rounded `solid` pill.
+                border: iced::border::rounded(0.0),
+                ..iced::widget::button::Style::default()
+            }
+        })
+        .into()
 }
 
 /// The controls bar shown flush under a playing video: play/pause, mute, a seek
