@@ -134,9 +134,8 @@ fn chip_width(text: &str) -> f32 {
     text.chars().count() as f32 * 7.5 + 30.0
 }
 
-/// Pack pre-measured chips into centered rows that wrap at `max_w` — an
-/// approximation of ebb's flex-wrap tag layout.
-fn flow(items: Vec<(f32, El<'static>)>, max_w: f32) -> El<'static> {
+/// Pack pre-measured chips into left-aligned rows that wrap at `max_w`.
+fn flow_left(items: Vec<(f32, El<'static>)>, max_w: f32) -> El<'static> {
     let gap = 4.0;
     let mut rows: Vec<El<'static>> = Vec::new();
     let mut current: Vec<El<'static>> = Vec::new();
@@ -158,7 +157,7 @@ fn flow(items: Vec<(f32, El<'static>)>, max_w: f32) -> El<'static> {
     if !current.is_empty() {
         rows.push(Row::with_children(current).spacing(gap).align_y(Center).into());
     }
-    Column::with_children(rows).spacing(2).align_x(Center).into()
+    Column::with_children(rows).spacing(4).align_x(iced::Left).into()
 }
 
 /// Fit `(iw, ih)` within `max_w` × `max_h`, preserving aspect ratio and never
@@ -625,47 +624,63 @@ impl Ribb {
         };
         groups.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // Flatten groups into one centered, width-wrapped flow (ebb's flex-wrap).
-        let hovered = self.hovered_tag.as_deref();
-        let mut chips: Vec<(f32, El<'static>)> = Vec::new();
+        let value_w = (avail - 140.0).max(180.0);
+        let mut rows: Vec<El<'static>> = Vec::new();
         for (label, tags) in &groups {
-            chips.push((chip_width(label), label_chip(label)));
-            for tag in tags {
-                let is_hovered = hovered == Some(tag.as_str());
-                chips.push((
-                    chip_width(tag),
-                    tag_button(tag, &query_words, &temp_words, is_hovered),
-                ));
-            }
+            let chips = tags
+                .iter()
+                .map(|tag| {
+                    (
+                        chip_width(tag),
+                        tag_button(tag, &query_words, &temp_words),
+                    )
+                })
+                .collect();
+            rows.push(detail_row(label, flow_left(chips, value_w)));
         }
-        let max_w = (avail - 24.0).max(160.0);
-        let groups_flow = flow(chips, max_w);
 
-        let rating_chip = container(text(post.rating.clone()).size(13).color(style::WHITE))
-            .padding([3, 12])
-            .style(rounded_bg(style::rating_color(&post.rating), 999.0));
+        rows.push(detail_row(
+            "Rating",
+            container(text(post.rating.clone()).size(13).color(style::WHITE))
+                .padding([2, 12])
+                .style(rounded_bg(style::rating_color(&post.rating), 999.0))
+                .into(),
+        ));
+        rows.push(detail_row(
+            "Post Date",
+            container(colored(format_date(&post.created_at), style::WHITE).size(13))
+                .padding([2, 12])
+                .style(rounded_bg(style::GRAY_700, 999.0))
+                .into(),
+        ));
+        rows.push(detail_row(
+            "Actions",
+            row![
+                action_button(
+                    icon_external_link().color(style::WHITE).size(14),
+                    "Open",
+                    Message::OpenExternal(post.post_view.clone()),
+                    style::BLUE_500,
+                    style::BLUE_600,
+                ),
+                action_button(
+                    icon_download().color(style::WHITE).size(14),
+                    "Download",
+                    Message::DownloadPost {
+                        post_id: post.id.clone(),
+                        url: post.file_url.clone(),
+                    },
+                    style::INDIGO_500,
+                    style::INDIGO_600,
+                ),
+            ]
+            .spacing(8)
+            .align_y(Center)
+            .into(),
+        ));
 
-        let date_chip = container(colored(format_date(&post.created_at), style::WHITE).size(13))
-            .padding([3, 12])
-            .style(rounded_bg(style::GRAY_700, 999.0));
-
-        let external = button(icon_external_link().color(style::WHITE).size(13))
-            .on_press(Message::OpenExternal(post.post_view.clone()))
-            .style(solid(style::BLUE_500, style::BLUE_600));
-
-        let meta = row![
-            label_chip("Rating"),
-            rating_chip,
-            Space::new().width(Length::Fixed(16.0)),
-            label_chip("Post Date"),
-            date_chip,
-            external,
-        ]
-        .spacing(8)
-        .align_y(Center);
-
-        column![groups_flow, container(meta).center_x(Length::Fill)]
-            .spacing(16)
+        Column::with_children(rows)
+            .spacing(8)
             .padding(8)
             .width(Length::Fill)
             .into()
@@ -749,16 +764,39 @@ impl Ribb {
     }
 }
 
-/// A single tag button, colored by whether it is in the submitted query and/or
-/// the unsubmitted input (ebb's TagButton states). The "open in new tab" `+`
-/// only appears (overlaid at the top-right) while the tag is hovered, matching
-/// ebb — and because it's an overlay it doesn't change the pill's layout size.
-fn tag_button(
-    tag: &str,
-    query_words: &[String],
-    temp_words: &[String],
-    hovered: bool,
+fn detail_row(label: &str, value: El<'static>) -> El<'static> {
+    row![
+        container(label_chip(label))
+            .width(Length::Fixed(96.0))
+            .align_right(Length::Fixed(96.0)),
+        container(value).width(Length::Fill),
+    ]
+    .spacing(10)
+    .align_y(Center)
+    .width(Length::Fill)
+    .into()
+}
+
+fn action_button(
+    icon: iced::widget::Text<'static>,
+    label: &'static str,
+    message: Message,
+    bg: Color,
+    hover: Color,
 ) -> El<'static> {
+    button(row![icon, text(label).size(13).color(style::WHITE)]
+        .spacing(6)
+        .align_y(Center))
+    .padding([3, 12])
+    .on_press(message)
+    .style(pill(bg, hover))
+    .into()
+}
+
+/// A single tag button, colored by whether it is in the submitted query and/or
+/// the unsubmitted input (ebb's TagButton states). Normal click toggles the tag
+/// in the current query; Ctrl+click opens the tag in a background tab.
+fn tag_button(tag: &str, query_words: &[String], temp_words: &[String]) -> El<'static> {
     let in_query = query_words.iter().any(|w| w == tag);
     let in_temp = temp_words.iter().any(|w| w == tag);
     let (bg_color, hover) = match (in_query, in_temp) {
@@ -768,33 +806,9 @@ fn tag_button(
         (false, false) => (style::BLUE_500, style::BLUE_700),    // default
     };
     let tag_owned = tag.to_string();
-    let pill_btn = button(text(tag_owned.clone()).size(13).color(style::WHITE))
-        .padding([2, 12])
-        .on_press(Message::TagClicked(tag_owned.clone()))
-        .style(pill(bg_color, hover));
-    let hover_area = mouse_area(pill_btn)
-        .on_enter(Message::TagHovered(Some(tag_owned.clone())))
-        .on_exit(Message::TagHovered(None));
-    // Reserve a margin (always, so hover doesn't shift layout) for the `+` to
-    // overlap the pill's top-right corner.
-    let base: El<'static> = container(hover_area)
-        .padding(iced::Padding {
-            top: 5.0,
-            right: 6.0,
-            bottom: 0.0,
-            left: 0.0,
-        })
-        .into();
-
-    if !hovered {
-        return base;
-    }
-    let plus = button(icon_plus().size(12).color(style::WHITE))
-        .padding([0, 5])
-        .on_press(Message::OpenTagInNewTab(tag_owned))
-        .style(pill(style::INDIGO_400, style::INDIGO_500));
-    let plus_overlay = container(plus)
-        .align_right(Length::Fill)
-        .align_top(Length::Fill);
-    stack![base, plus_overlay].into()
+    button(text(tag_owned.clone()).size(13).color(style::WHITE))
+        .padding([3, 12])
+        .on_press(Message::TagClicked(tag_owned))
+        .style(pill(bg_color, hover))
+        .into()
 }

@@ -6,6 +6,7 @@
 
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use iced::advanced::widget::{operation, Id};
@@ -19,8 +20,8 @@ use iced::{
 };
 use iced_ruffle::{Ruffle, RufflePlayer};
 use lucide_icons::iced::{
-    icon_chevron_left, icon_chevron_right, icon_external_link, icon_plus, icon_search,
-    icon_settings, icon_x,
+    icon_chevron_left, icon_chevron_right, icon_download, icon_external_link, icon_plus,
+    icon_search, icon_settings, icon_x,
 };
 
 use crate::booru::{
@@ -73,8 +74,8 @@ pub struct Ribb {
     scroll_anchor: Option<String>,
     /// Tab whose saved scroll offset is about to be restored after activation.
     pending_scroll_restore: Option<u64>,
-    /// Tag currently hovered in a detail view (its "open in new tab" + shows).
-    hovered_tag: Option<String>,
+    /// Latest keyboard modifier state; used for Ctrl+click tag behavior.
+    modifiers: iced::keyboard::Modifiers,
     /// Exact content-area (scroll viewport) size, measured by the view's
     /// `responsive` wrapper and read back here for precise scroll math.
     viewport: Cell<Size>,
@@ -177,8 +178,14 @@ pub enum Message {
     AutocompleteSelected(String),
     TogglePost(String),
     TagClicked(String),
-    TagHovered(Option<String>),
-    OpenTagInNewTab(String),
+    DownloadPost {
+        post_id: String,
+        url: String,
+    },
+    DownloadFinished {
+        post_id: String,
+        result: Result<PathBuf, String>,
+    },
     OpenExternal(String),
     // Images / SWF
     ImageLoaded(String, ImageKind, Option<DecodedImage>),
@@ -250,7 +257,7 @@ impl Ribb {
             anchor_id: Id::unique(),
             scroll_anchor: None,
             pending_scroll_restore: None,
-            hovered_tag: None,
+            modifiers: iced::keyboard::Modifiers::default(),
             viewport: Cell::new(Size::new(1100.0, 700.0)),
             window: Size::new(1100.0, 800.0),
         }
@@ -304,6 +311,14 @@ impl Ribb {
     fn handle_key(&mut self, event: iced::keyboard::Event) -> Task<Message> {
         use iced::keyboard::key::{Key, Named};
         use iced::keyboard::Event;
+        match &event {
+            Event::KeyPressed { modifiers, .. } | Event::KeyReleased { modifiers, .. } => {
+                self.modifiers = *modifiers;
+            }
+            Event::ModifiersChanged(modifiers) => {
+                self.modifiers = *modifiers;
+            }
+        }
         let Event::KeyPressed { key, modifiers, .. } = event else {
             return Task::none();
         };
@@ -527,6 +542,9 @@ impl Ribb {
             }
             Message::TogglePost(post_id) => self.toggle_post(post_id),
             Message::TagClicked(tag) => {
+                if self.modifiers.control() {
+                    return self.push_tab(Some(tag), false);
+                }
                 let tab = &mut self.tabs[self.active];
                 let mut words: Vec<String> = tab
                     .temp_query
@@ -541,11 +559,26 @@ impl Ribb {
                 tab.temp_query = words.join(" ");
                 Task::none()
             }
-            Message::TagHovered(tag) => {
-                self.hovered_tag = tag;
+            Message::DownloadPost { post_id, url } => {
+                let client = self.client.http().clone();
+                let download_post_id = post_id.clone();
+                Task::perform(
+                    async move { download_post_file(client, &download_post_id, url).await },
+                    move |result| Message::DownloadFinished {
+                        post_id: post_id.clone(),
+                        result,
+                    },
+                )
+            }
+            Message::DownloadFinished { post_id, result } => {
+                match result {
+                    Ok(path) => {
+                        tracing::info!(post = %post_id, path = %path.display(), "downloaded post file")
+                    }
+                    Err(e) => tracing::warn!(post = %post_id, "download failed: {e}"),
+                }
                 Task::none()
             }
-            Message::OpenTagInNewTab(tag) => self.push_tab(Some(tag), false),
             Message::OpenExternal(url) => {
                 if let Err(e) = open::that(&url) {
                     tracing::warn!("failed to open {url}: {e}");
@@ -996,6 +1029,46 @@ fn last_word(query: &str) -> String {
         .to_string()
 }
 
+async fn download_post_file(
+    client: reqwest::Client,
+    post_id: &str,
+    url: String,
+) -> Result<PathBuf, String> {
+    let (_url, bytes) = fetch_bytes(client, url.clone()).await;
+    let bytes = bytes.ok_or_else(|| "failed to fetch file".to_string())?;
+    let dir = directories::UserDirs::new()
+        .and_then(|dirs| dirs.download_dir().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(download_filename(post_id, &url));
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+fn download_filename(post_id: &str, url: &str) -> String {
+    let extension = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .path_segments()
+                .and_then(|mut segments| segments.next_back().map(str::to_string))
+        })
+        .and_then(|name| {
+            name.rsplit_once('.')
+                .map(|(_, ext)| sanitize_extension(ext))
+        })
+        .filter(|ext| !ext.is_empty())
+        .unwrap_or_else(|| "bin".to_string());
+    format!("ribb-{post_id}.{extension}")
+}
+
+fn sanitize_extension(ext: &str) -> String {
+    ext.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(12)
+        .collect()
+}
+
 /// The thumbnail URL ebb's `PostPreview` would pick: first displayable image
 /// among sample → preview → file, skipping known placeholders.
 fn preview_url(post: &BooruPost) -> Option<String> {
@@ -1061,5 +1134,14 @@ mod tests {
         };
         // Sample (image) wins over the blacklisted preview and the webm file.
         assert_eq!(preview_url(&post).as_deref(), Some("https://x/s.jpg"));
+    }
+
+    #[test]
+    fn download_filename_uses_post_id_and_url_extension() {
+        assert_eq!(
+            download_filename("14182743", "https://img.example/post/file.jpeg?download=1"),
+            "ribb-14182743.jpeg"
+        );
+        assert_eq!(download_filename("42", "not a url"), "ribb-42.bin");
     }
 }
