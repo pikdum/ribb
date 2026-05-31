@@ -194,11 +194,15 @@ fn drain_video(
     decoder: &mut ffmpeg::decoder::Video,
     scaler: &mut Option<Scaler>,
     tb_secs: f64,
+    pts_offset: i64,
     shared: &Shared,
 ) {
     let mut frame = VideoFrame::empty();
     while decoder.receive_frame(&mut frame).is_ok() {
-        let rgba = make_rgba(scaler, frame.clone(), tb_secs);
+        let mut rgba = make_rgba(scaler, frame.clone(), tb_secs);
+        // Each loop pass restarts pts at 0; offset it so frame pts stays
+        // monotonic in lockstep with the continuous (audio/wall) clock.
+        rgba.pts_ms += pts_offset;
         shared.frames.lock().unwrap().push_back(rgba);
     }
 }
@@ -209,9 +213,8 @@ fn run(
     audio_ring: Option<Arc<AudioRing>>,
 ) -> Result<(), ffmpeg::Error> {
     let mut ictx = ffmpeg::format::input(&path)?;
-    shared
-        .duration_ms
-        .store(ictx.duration() / 1000, Ordering::Relaxed);
+    let duration_ms = ictx.duration() / 1000;
+    shared.duration_ms.store(duration_ms, Ordering::Relaxed);
 
     // Video stream + decoder.
     let (v_index, v_tb_secs, mut v_decoder) = {
@@ -232,17 +235,10 @@ fn run(
     shared.has_audio.store(audio.is_some(), Ordering::Release);
     shared.opened.store(true, Ordering::Release);
 
-    let mut eof = false;
+    // Accumulated pts offset for the current loop pass (see `drain_video`).
+    let mut loop_offset: i64 = 0;
     loop {
         if shared.quit.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        if eof {
-            // All frames decoded; hold them and idle until collapse/quit.
-            shared.eof.store(true, Ordering::Release);
-            while !shared.quit.load(Ordering::Acquire) {
-                thread::sleep(Duration::from_millis(20));
-            }
             return Ok(());
         }
 
@@ -263,7 +259,13 @@ fn run(
                 let stream = packet.stream();
                 if stream == v_index {
                     let _ = v_decoder.send_packet(&packet);
-                    drain_video(&mut v_decoder, &mut v_scaler, v_tb_secs, shared);
+                    drain_video(
+                        &mut v_decoder,
+                        &mut v_scaler,
+                        v_tb_secs,
+                        loop_offset,
+                        shared,
+                    );
                 } else if let (Some(a), Some(ring)) = (&mut audio, &audio_ring) {
                     if stream == a.index {
                         let _ = a.decoder.send_packet(&packet);
@@ -272,14 +274,38 @@ fn run(
                 }
             }
             Err(_) => {
-                // EOF/error: flush both decoders, then idle.
+                // End of this pass: flush each decoder's remaining frames.
                 let _ = v_decoder.send_eof();
-                drain_video(&mut v_decoder, &mut v_scaler, v_tb_secs, shared);
+                drain_video(
+                    &mut v_decoder,
+                    &mut v_scaler,
+                    v_tb_secs,
+                    loop_offset,
+                    shared,
+                );
                 if let (Some(a), Some(ring)) = (&mut audio, &audio_ring) {
                     let _ = a.decoder.send_eof();
                     drain_audio(a, ring);
                 }
-                eof = true;
+
+                if duration_ms > 0 {
+                    // Loop: rewind to the start and keep decoding. Audio sample
+                    // count and (offset) video pts both stay monotonic, so the
+                    // clock keeps advancing seamlessly across the boundary.
+                    let _ = ictx.seek(0, ..);
+                    v_decoder.flush();
+                    if let Some(a) = &mut audio {
+                        a.decoder.flush();
+                    }
+                    loop_offset += duration_ms;
+                } else {
+                    // Unknown duration: can't loop cleanly, hold and idle.
+                    shared.eof.store(true, Ordering::Release);
+                    while !shared.quit.load(Ordering::Acquire) {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    return Ok(());
+                }
             }
         }
     }
