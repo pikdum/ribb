@@ -76,10 +76,39 @@
           ln -s ../src "$rc/core/src"
         '';
 
+        # Decode-only ffmpeg. ribb only ever DECODES webm (matroska → vp8/vp9/av1)
+        # and mp4 (mov → h264/hevc) plus their audio (aac/opus/vorbis/mp3/flac) —
+        # `is_video` matches only those two extensions; everything else (jpg/png/
+        # gif/webp) goes through the `image` crate, never ffmpeg. It never encodes,
+        # muxes, filters, or touches the network. So `--disable-everything` + a
+        # tight allowlist drops the hundreds of unused codecs/muxers/protocols.
+        # The built-in video decoders need no external codec lib, so the
+        # encode-only deps (x264, libvpx, …) fall away with them. This is what
+        # shrinks the static Windows .exe (and the Linux closure) the most.
+        ffmpegDecodeFlags = [
+          "--disable-everything"
+          "--enable-protocol=file"
+          "--enable-demuxer=mov,matroska"
+          "--enable-decoder=h264,hevc,vp8,vp9,av1,mpeg4,mjpeg"
+          "--enable-decoder=aac,aac_latm,mp3,vorbis,opus,flac,ac3,alac,pcm_s16le,pcm_s16be,pcm_u8,pcm_f32le,pcm_f32be"
+          "--enable-parser=h264,hevc,vp8,vp9,av1,mpeg4video,aac,aac_latm,vorbis,opus,mpegaudio,flac,ac3"
+          "--enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,vp9_superframe_split,vp9_raw_reorder,av1_frame_split,aac_adtstoasc,mpeg4_unpack_bframes,extract_extradata"
+        ];
+
+        # Native decode-only build: ffmpeg-headless (no SDL/X11/etc.) trimmed to
+        # the allowlist above. ffmpeg-sys-next links it dynamically.
+        ffmpegNative = pkgs.ffmpeg-headless.overrideAttrs (old: {
+          configureFlags = (old.configureFlags or [ ]) ++ ffmpegDecodeFlags;
+          # ffmpeg's own test binaries (e.g. libavfilter/tests/integral) reference
+          # symbols from filters that --disable-everything removed, so the check
+          # phase fails to link. We only consume the libs, not ffmpeg's tests.
+          doCheck = false;
+        });
+
         # Native libs iced (wgpu) + winit dlopen at runtime by name — not picked up
         # by RUNPATH, so they go on LD_LIBRARY_PATH via the wrapper for a
         # self-contained AppImage. Plus ALSA for cpal audio (video + Ruffle).
-        # ffmpeg-full is a *direct* dynamic dep (ffmpeg-sys-next), but its store
+        # ffmpegNative is a *direct* dynamic dep (ffmpeg-sys-next), but its store
         # path lands on neither RUNPATH nor the bare LD_LIBRARY_PATH, so the
         # installed/AppImage binary can't find libav*.so.* — hence it goes here
         # too, not just in buildInputs.
@@ -93,7 +122,7 @@
           libxi
           libxrandr
           alsa-lib
-          ffmpeg-full
+          ffmpegNative
         ];
 
         # mesa's lavapipe — software Vulkan driver. A self-contained AppImage ships
@@ -150,7 +179,7 @@
 
           desktopItems = [ desktopItem ];
           buildInputs = [
-            pkgs.ffmpeg-full
+            ffmpegNative
             pkgs.alsa-lib
           ];
 
@@ -213,11 +242,12 @@
             withSdl2 = false;
           }).overrideAttrs
             (old: {
-              # gfxcapture is a WinRT screen-capture source filter (C++) we never
-              # use; statically it drags in WinRT/mcfgthread link deps
-              # (undefined _MCF_mutex_* / __MCF_gthr_*). Disable it so libavfilter.a
-              # carries no WinRT object.
-              configureFlags = (old.configureFlags or [ ]) ++ [ "--disable-filter=gfxcapture" ];
+              # Same decode-only allowlist as the native build (see ffmpegDecodeFlags).
+              # `--disable-everything` builds no filters at all, which also subsumes
+              # the old gfxcapture hack: that WinRT screen-capture filter used to drag
+              # in mcfgthread/WinRT link deps (undefined _MCF_mutex_* / __MCF_gthr_*)
+              # into libavfilter.a; with no filters built it simply can't.
+              configureFlags = (old.configureFlags or [ ]) ++ ffmpegDecodeFlags;
             });
 
         winRust = fenixPkgs.combine [
