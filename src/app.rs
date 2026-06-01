@@ -8,7 +8,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use iced::advanced::widget::{operation, Id};
 use iced::widget::{
@@ -21,9 +21,9 @@ use iced::{
 };
 use iced_ruffle::{Ruffle, RufflePlayer};
 use lucide_icons::iced::{
-    icon_chevron_left, icon_chevron_right, icon_copy, icon_download, icon_external_link,
-    icon_pause, icon_play, icon_plus, icon_search, icon_settings, icon_volume_2, icon_volume_x,
-    icon_x,
+    icon_check, icon_chevron_left, icon_chevron_right, icon_copy, icon_download,
+    icon_external_link, icon_pause, icon_play, icon_plus, icon_search, icon_settings,
+    icon_volume_2, icon_volume_x, icon_x,
 };
 
 use crate::booru::{
@@ -91,6 +91,25 @@ pub struct Ribb {
     /// for the app's lifetime so X11 selection ownership persists after a copy
     /// (dropping it would drop the selection); `None` until the first copy.
     clipboard: Option<arboard::Clipboard>,
+    /// Transient UI status of per-post action buttons (Download / Copy). Absent
+    /// = idle; a `Done`/`Failed` entry self-clears ~2s after it settles.
+    actions: HashMap<(String, ActionKind), ActionStatus>,
+}
+
+/// Which per-post action a button drives (key into [`Ribb::actions`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ActionKind {
+    Download,
+    Copy,
+}
+
+/// Transient UI status of a per-post action button. Idle is the absence of an
+/// entry; this enum is only the non-idle states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionStatus {
+    InProgress,
+    Done,
+    Failed,
 }
 
 /// One search session — ebb's per-tab `MainContext`.
@@ -237,6 +256,11 @@ pub enum Message {
         post_id: String,
         result: Result<ClipboardImage, String>,
     },
+    /// Revert a settled (Done/Failed) action button back to its idle state.
+    ClearAction {
+        post_id: String,
+        kind: ActionKind,
+    },
     OpenExternal(String),
     // Images / SWF
     ImageLoaded(String, ImageKind, Option<DecodedImage>),
@@ -326,6 +350,7 @@ impl Ribb {
             viewport: Cell::new(Size::new(1100.0, 700.0)),
             window: Size::new(1100.0, 800.0),
             clipboard: None,
+            actions: HashMap::new(),
         }
     }
 
@@ -379,6 +404,38 @@ impl Ribb {
             subs.push(iced::window::frames().map(Message::VideoTick));
         }
         Subscription::batch(subs)
+    }
+
+    /// Put a decoded image on the system clipboard, returning whether it stuck.
+    /// The clipboard handle is opened lazily and kept for the app's lifetime;
+    /// on X11 the selection is only served while the handle lives.
+    fn copy_to_clipboard(&mut self, post_id: &str, image: ClipboardImage) -> bool {
+        let clipboard = match &mut self.clipboard {
+            Some(c) => c,
+            None => match arboard::Clipboard::new() {
+                Ok(c) => self.clipboard.insert(c),
+                Err(e) => {
+                    tracing::warn!("clipboard unavailable: {e}");
+                    return false;
+                }
+            },
+        };
+        let (width, height) = (image.width, image.height);
+        let data = arboard::ImageData {
+            width,
+            height,
+            bytes: image.rgba.into(),
+        };
+        match clipboard.set_image(data) {
+            Ok(()) => {
+                tracing::info!(post = %post_id, width, height, "copied image to clipboard");
+                true
+            }
+            Err(e) => {
+                tracing::warn!(post = %post_id, "clipboard set failed: {e}");
+                false
+            }
+        }
     }
 
     /// Translate a Ctrl-modified key press into a tab action (ebb's shortcuts).
@@ -710,6 +767,10 @@ impl Ribb {
                 Task::none()
             }
             Message::DownloadPost { post_id, url } => {
+                self.actions.insert(
+                    (post_id.clone(), ActionKind::Download),
+                    ActionStatus::InProgress,
+                );
                 let client = self.client.http().clone();
                 let download_post_id = post_id.clone();
                 Task::perform(
@@ -721,15 +782,25 @@ impl Ribb {
                 )
             }
             Message::DownloadFinished { post_id, result } => {
-                match result {
+                let status = match result {
                     Ok(path) => {
-                        tracing::info!(post = %post_id, path = %path.display(), "downloaded post file")
+                        tracing::info!(post = %post_id, path = %path.display(), "downloaded post file");
+                        ActionStatus::Done
                     }
-                    Err(e) => tracing::warn!(post = %post_id, "download failed: {e}"),
-                }
-                Task::none()
+                    Err(e) => {
+                        tracing::warn!(post = %post_id, "download failed: {e}");
+                        ActionStatus::Failed
+                    }
+                };
+                self.actions
+                    .insert((post_id.clone(), ActionKind::Download), status);
+                clear_action_later(post_id, ActionKind::Download)
             }
             Message::CopyImage { post_id, url } => {
+                self.actions.insert(
+                    (post_id.clone(), ActionKind::Copy),
+                    ActionStatus::InProgress,
+                );
                 let client = self.client.http().clone();
                 Task::perform(
                     async move { fetch_image_rgba(client, url).await },
@@ -740,43 +811,28 @@ impl Ribb {
                 )
             }
             Message::ImageCopyReady { post_id, result } => {
-                let image = match result {
-                    Ok(image) => image,
+                let ok = match result {
+                    Ok(image) => self.copy_to_clipboard(&post_id, image),
                     Err(e) => {
                         tracing::warn!(post = %post_id, "copy failed: {e}");
-                        return Task::none();
+                        false
                     }
                 };
-                // Open the clipboard lazily and keep it for the app's lifetime;
-                // on X11 the selection is only served while this handle lives.
-                let clipboard = match &mut self.clipboard {
-                    Some(c) => Some(c),
-                    None => match arboard::Clipboard::new() {
-                        Ok(c) => {
-                            self.clipboard = Some(c);
-                            self.clipboard.as_mut()
-                        }
-                        Err(e) => {
-                            tracing::warn!("clipboard unavailable: {e}");
-                            None
-                        }
-                    },
+                let status = if ok {
+                    ActionStatus::Done
+                } else {
+                    ActionStatus::Failed
                 };
-                if let Some(clipboard) = clipboard {
-                    let data = arboard::ImageData {
-                        width: image.width,
-                        height: image.height,
-                        bytes: image.rgba.into(),
-                    };
-                    match clipboard.set_image(data) {
-                        Ok(()) => tracing::info!(
-                            post = %post_id,
-                            width = image.width,
-                            height = image.height,
-                            "copied image to clipboard"
-                        ),
-                        Err(e) => tracing::warn!(post = %post_id, "clipboard set failed: {e}"),
-                    }
+                self.actions
+                    .insert((post_id.clone(), ActionKind::Copy), status);
+                clear_action_later(post_id, ActionKind::Copy)
+            }
+            Message::ClearAction { post_id, kind } => {
+                // Only clear a settled status; if a fresh action is now in
+                // progress for this button, leave it be.
+                let key = (post_id, kind);
+                if self.actions.get(&key) != Some(&ActionStatus::InProgress) {
+                    self.actions.remove(&key);
                 }
                 Task::none()
             }
@@ -1332,6 +1388,18 @@ async fn download_post_file(
     Ok(path)
 }
 
+/// Revert a settled action button to idle after a short delay, so "Copied" /
+/// "Downloaded" / "Failed" is a brief confirmation rather than a stuck label.
+fn clear_action_later(post_id: String, kind: ActionKind) -> Task<Message> {
+    Task::perform(
+        async { tokio::time::sleep(Duration::from_secs(2)).await },
+        move |()| Message::ClearAction {
+            post_id: post_id.clone(),
+            kind,
+        },
+    )
+}
+
 /// Fetch a post's image and decode it to full-resolution RGBA8 for the
 /// clipboard. Like the grid path, decode runs on a blocking thread (CPU-bound);
 /// unlike it, there's no downscale — clipboard paste wants the real pixels.
@@ -1441,6 +1509,53 @@ mod tests {
         };
         // Sample (image) wins over the blacklisted preview and the webm file.
         assert_eq!(preview_url(&post).as_deref(), Some("https://x/s.jpg"));
+    }
+
+    #[test]
+    fn action_status_transitions() {
+        let mut app = Ribb::new();
+        let pid = "123".to_string();
+        let key = (pid.clone(), ActionKind::Download);
+        let url = "https://x/a.jpg".to_string();
+
+        // idle -> in progress on click
+        assert_eq!(app.actions.get(&key), None);
+        let _ = app.update(Message::DownloadPost {
+            post_id: pid.clone(),
+            url: url.clone(),
+        });
+        assert_eq!(app.actions.get(&key), Some(&ActionStatus::InProgress));
+
+        // success -> done, then ClearAction reverts to idle
+        let _ = app.update(Message::DownloadFinished {
+            post_id: pid.clone(),
+            result: Ok(PathBuf::from("/tmp/a.jpg")),
+        });
+        assert_eq!(app.actions.get(&key), Some(&ActionStatus::Done));
+        let _ = app.update(Message::ClearAction {
+            post_id: pid.clone(),
+            kind: ActionKind::Download,
+        });
+        assert_eq!(app.actions.get(&key), None);
+
+        // failure -> failed
+        let _ = app.update(Message::DownloadFinished {
+            post_id: pid.clone(),
+            result: Err("boom".into()),
+        });
+        assert_eq!(app.actions.get(&key), Some(&ActionStatus::Failed));
+
+        // a stale ClearAction must not wipe a freshly re-started action
+        let _ = app.update(Message::DownloadPost {
+            post_id: pid.clone(),
+            url,
+        });
+        assert_eq!(app.actions.get(&key), Some(&ActionStatus::InProgress));
+        let _ = app.update(Message::ClearAction {
+            post_id: pid,
+            kind: ActionKind::Download,
+        });
+        assert_eq!(app.actions.get(&key), Some(&ActionStatus::InProgress));
     }
 
     #[test]

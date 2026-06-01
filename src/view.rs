@@ -761,9 +761,14 @@ impl Ribb {
                 style::BLUE_500,
                 style::BLUE_600,
             ),
-            action_button(
+            action_button_stateful(
+                self.actions
+                    .get(&(post.id.clone(), ActionKind::Download))
+                    .copied(),
                 icon_download().color(style::WHITE).size(14),
                 "Download",
+                "Downloading…",
+                "Downloaded",
                 Message::DownloadPost {
                     post_id: post.id.clone(),
                     url: post.file_url.clone(),
@@ -777,9 +782,14 @@ impl Ribb {
         // Copy-to-clipboard only makes sense for still images (we decode the
         // file to RGBA); videos/SWF have no single image to hand over.
         if is_image(&post.file_url) {
-            actions = actions.push(action_button(
+            actions = actions.push(action_button_stateful(
+                self.actions
+                    .get(&(post.id.clone(), ActionKind::Copy))
+                    .copied(),
                 icon_copy().color(style::WHITE).size(14),
                 "Copy",
+                "Copying…",
+                "Copied",
                 Message::CopyImage {
                     post_id: post.id.clone(),
                     url: post.file_url.clone(),
@@ -979,6 +989,57 @@ fn action_button(
     .on_press(message)
     .style(pill(bg, hover))
     .into()
+}
+
+/// An action button that reflects its [`ActionStatus`]: idle (clickable),
+/// in-progress (busy label, greyed, not clickable), done (check + green), or
+/// failed (x + red). Idle/done/failed are clickable so the action can re-run.
+#[allow(clippy::too_many_arguments)]
+fn action_button_stateful(
+    status: Option<ActionStatus>,
+    idle_icon: iced::widget::Text<'static>,
+    idle_label: &'static str,
+    busy_label: &'static str,
+    done_label: &'static str,
+    message: Message,
+    bg: Color,
+    hover: Color,
+) -> El<'static> {
+    let (icon, label, on_press, bgc, hoverc) = match status {
+        None => (idle_icon, idle_label, Some(message), bg, hover),
+        Some(ActionStatus::InProgress) => (
+            idle_icon,
+            busy_label,
+            None,
+            style::GRAY_500,
+            style::GRAY_500,
+        ),
+        Some(ActionStatus::Done) => (
+            icon_check().color(style::WHITE).size(14),
+            done_label,
+            Some(message),
+            style::GREEN_500,
+            style::GREEN_600,
+        ),
+        Some(ActionStatus::Failed) => (
+            icon_x().color(style::WHITE).size(14),
+            "Failed",
+            Some(message),
+            style::RED_500,
+            style::RED_500,
+        ),
+    };
+    let mut b = button(
+        row![icon, text(label).size(13).color(style::WHITE)]
+            .spacing(6)
+            .align_y(Center),
+    )
+    .padding([3, 12])
+    .style(pill(bgc, hoverc));
+    if let Some(message) = on_press {
+        b = b.on_press(message);
+    }
+    b.into()
 }
 
 /// A single tag button, colored by whether it is in the submitted query and/or
