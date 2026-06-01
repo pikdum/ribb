@@ -79,6 +79,10 @@
         # Native libs iced (wgpu) + winit dlopen at runtime by name — not picked up
         # by RUNPATH, so they go on LD_LIBRARY_PATH via the wrapper for a
         # self-contained AppImage. Plus ALSA for cpal audio (video + Ruffle).
+        # ffmpeg-full is a *direct* dynamic dep (ffmpeg-sys-next), but its store
+        # path lands on neither RUNPATH nor the bare LD_LIBRARY_PATH, so the
+        # installed/AppImage binary can't find libav*.so.* — hence it goes here
+        # too, not just in buildInputs.
         runtimeLibs = with pkgs; [
           vulkan-loader
           wayland
@@ -89,6 +93,7 @@
           libxi
           libxrandr
           alsa-lib
+          ffmpeg-full
         ];
 
         # mesa's lavapipe — software Vulkan driver. A self-contained AppImage ships
