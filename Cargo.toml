@@ -76,3 +76,16 @@ swf = { path = "vendor/swf" }
 
 [patch."https://github.com/ruffle-rs/ruffle"]
 swf = { path = "vendor/swf" }
+
+# Release tuning, aimed mainly at the static Windows .exe but a win everywhere.
+# Deliberately keeps opt-level = 3: ribb's image-grid decode (the `image` crate)
+# is CPU-bound and noticeably slower at "s"/"z", so we trade size only via levers
+# that don't hurt throughput — fat LTO (cross-crate inlining + dead-code removal),
+# a single codegen unit (more inlining/DCE, smaller output), and panic = "abort"
+# (drops the unwind tables and landing pads — we never catch_unwind). `strip`
+# removes the symbol table rustc would otherwise leave in the binary.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

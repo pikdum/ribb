@@ -272,6 +272,12 @@
           doCheck = false;
           cargoBuildFlags = [ "--locked" ];
 
+          # nixpkgs' fixup only runs `strip --strip-debug` on binaries, and rustc's
+          # own `strip = true` (Cargo.toml) doesn't clear the COFF symbol table on
+          # the windows-gnu target — ~44k symbols (~3.7M) survive. Force a real
+          # `--strip-all` over $out/bin to drop them.
+          stripAllList = [ "bin" ];
+
           # Build scripts (incl. Ruffle's JDK-free rascal playerglobal) run on the
           # host; the cross toolchain targets Windows.
           depsBuildBuild = [ crossPkgs.stdenv.cc ];
