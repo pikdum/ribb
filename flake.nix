@@ -58,7 +58,7 @@
         # doesn't hit "found duplicate version".
         baseVendor = rustPlatform.fetchCargoVendor {
           src = lib.cleanSource ./.;
-          hash = "sha256-FwbQV2MhEZ6p6qxTkBxxRPrjifqsU/go5D4zbvQ9QqQ=";
+          hash = "sha256-eNyCmTzKirb7xhb6abAbgCJsgEZ2QT3YlY1+eayXzOE=";
         };
         # `ruffle_core`'s build.rs compiles its playerglobal from
         # `repo_root("../")/core/src/avm{1,2}/globals/`, but vendoring flattens the
