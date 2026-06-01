@@ -59,6 +59,12 @@ ffmpeg-next = "8.1"
 cpal = "0.16"
 bytemuck = "1"
 tempfile = "3"
+# Copy-to-clipboard for the actual image (paste into Discord etc.). iced's own
+# clipboard is text-only; arboard does image data. Pure-Rust backends (x11rb /
+# wl-clipboard-rs on Linux, clipboard-win on Windows) — no extra system libs.
+# wayland-data-control (off by default) gives native Wayland clipboard on
+# wlroots compositors; arboard still falls back to X11/XWayland elsewhere.
+arboard = { version = "3", features = ["wayland-data-control"] }
 # Same wgpu as iced 0.14 (unifies to one instance) for the custom video shader.
 wgpu = "27"
 

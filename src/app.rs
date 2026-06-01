@@ -21,8 +21,9 @@ use iced::{
 };
 use iced_ruffle::{Ruffle, RufflePlayer};
 use lucide_icons::iced::{
-    icon_chevron_left, icon_chevron_right, icon_download, icon_external_link, icon_pause,
-    icon_play, icon_plus, icon_search, icon_settings, icon_volume_2, icon_volume_x, icon_x,
+    icon_chevron_left, icon_chevron_right, icon_copy, icon_download, icon_external_link,
+    icon_pause, icon_play, icon_plus, icon_search, icon_settings, icon_volume_2, icon_volume_x,
+    icon_x,
 };
 
 use crate::booru::{
@@ -86,6 +87,10 @@ pub struct Ribb {
     /// `responsive` wrapper and read back here for precise scroll math.
     viewport: Cell<Size>,
     window: Size,
+    /// Lazily-opened system clipboard for the "Copy" image action. Held alive
+    /// for the app's lifetime so X11 selection ownership persists after a copy
+    /// (dropping it would drop the selection); `None` until the first copy.
+    clipboard: Option<arboard::Clipboard>,
 }
 
 /// One search session — ebb's per-tab `MainContext`.
@@ -155,6 +160,26 @@ impl Tab {
 // Messages
 // ---------------------------------------------------------------------------
 
+/// A decoded RGBA8 image ready to be placed on the clipboard. Carried in a
+/// `Message`, so it has a compact `Debug` that prints the byte count rather
+/// than the whole pixel buffer.
+#[derive(Clone)]
+pub struct ClipboardImage {
+    width: usize,
+    height: usize,
+    rgba: Vec<u8>,
+}
+
+impl std::fmt::Debug for ClipboardImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClipboardImage")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("bytes", &self.rgba.len())
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     // Tabs
@@ -200,6 +225,17 @@ pub enum Message {
     DownloadFinished {
         post_id: String,
         result: Result<PathBuf, String>,
+    },
+    /// Copy the post's full image to the system clipboard (so it can be pasted
+    /// into another app). Only offered for image posts.
+    CopyImage {
+        post_id: String,
+        url: String,
+    },
+    /// The fetched+decoded image is ready to hand to the clipboard (or an error).
+    ImageCopyReady {
+        post_id: String,
+        result: Result<ClipboardImage, String>,
     },
     OpenExternal(String),
     // Images / SWF
@@ -289,6 +325,7 @@ impl Ribb {
             modifiers: iced::keyboard::Modifiers::default(),
             viewport: Cell::new(Size::new(1100.0, 700.0)),
             window: Size::new(1100.0, 800.0),
+            clipboard: None,
         }
     }
 
@@ -689,6 +726,57 @@ impl Ribb {
                         tracing::info!(post = %post_id, path = %path.display(), "downloaded post file")
                     }
                     Err(e) => tracing::warn!(post = %post_id, "download failed: {e}"),
+                }
+                Task::none()
+            }
+            Message::CopyImage { post_id, url } => {
+                let client = self.client.http().clone();
+                Task::perform(
+                    async move { fetch_image_rgba(client, url).await },
+                    move |result| Message::ImageCopyReady {
+                        post_id: post_id.clone(),
+                        result,
+                    },
+                )
+            }
+            Message::ImageCopyReady { post_id, result } => {
+                let image = match result {
+                    Ok(image) => image,
+                    Err(e) => {
+                        tracing::warn!(post = %post_id, "copy failed: {e}");
+                        return Task::none();
+                    }
+                };
+                // Open the clipboard lazily and keep it for the app's lifetime;
+                // on X11 the selection is only served while this handle lives.
+                let clipboard = match &mut self.clipboard {
+                    Some(c) => Some(c),
+                    None => match arboard::Clipboard::new() {
+                        Ok(c) => {
+                            self.clipboard = Some(c);
+                            self.clipboard.as_mut()
+                        }
+                        Err(e) => {
+                            tracing::warn!("clipboard unavailable: {e}");
+                            None
+                        }
+                    },
+                };
+                if let Some(clipboard) = clipboard {
+                    let data = arboard::ImageData {
+                        width: image.width,
+                        height: image.height,
+                        bytes: image.rgba.into(),
+                    };
+                    match clipboard.set_image(data) {
+                        Ok(()) => tracing::info!(
+                            post = %post_id,
+                            width = image.width,
+                            height = image.height,
+                            "copied image to clipboard"
+                        ),
+                        Err(e) => tracing::warn!(post = %post_id, "clipboard set failed: {e}"),
+                    }
                 }
                 Task::none()
             }
@@ -1209,6 +1297,7 @@ fn wants_search_focus(message: &Message) -> bool {
             | Message::SubmitSearch
             | Message::OpenExternal(_)
             | Message::DownloadPost { .. }
+            | Message::CopyImage { .. }
             | Message::CloseSettings
             | Message::SaveSettings
     )
@@ -1241,6 +1330,26 @@ async fn download_post_file(
     let path = dir.join(download_filename(post_id, &url));
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+/// Fetch a post's image and decode it to full-resolution RGBA8 for the
+/// clipboard. Like the grid path, decode runs on a blocking thread (CPU-bound);
+/// unlike it, there's no downscale — clipboard paste wants the real pixels.
+async fn fetch_image_rgba(client: reqwest::Client, url: String) -> Result<ClipboardImage, String> {
+    let (_url, bytes) = fetch_bytes(client, url).await;
+    let bytes = bytes.ok_or_else(|| "failed to fetch image".to_string())?;
+    tokio::task::spawn_blocking(move || {
+        let rgba = ::image::load_from_memory(&bytes)
+            .map_err(|e| e.to_string())?
+            .to_rgba8();
+        Ok(ClipboardImage {
+            width: rgba.width() as usize,
+            height: rgba.height() as usize,
+            rgba: rgba.into_raw(),
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn download_filename(post_id: &str, url: &str) -> String {

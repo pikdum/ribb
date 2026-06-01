@@ -753,31 +753,42 @@ impl Ribb {
                 .style(rounded_bg(style::GRAY_700, 999.0))
                 .into(),
         ));
-        rows.push(detail_row(
-            "Actions",
-            row![
-                action_button(
-                    icon_external_link().color(style::WHITE).size(14),
-                    "Open",
-                    Message::OpenExternal(post.post_view.clone()),
-                    style::BLUE_500,
-                    style::BLUE_600,
-                ),
-                action_button(
-                    icon_download().color(style::WHITE).size(14),
-                    "Download",
-                    Message::DownloadPost {
-                        post_id: post.id.clone(),
-                        url: post.file_url.clone(),
-                    },
-                    style::INDIGO_500,
-                    style::INDIGO_600,
-                ),
-            ]
-            .spacing(8)
-            .align_y(Center)
-            .into(),
-        ));
+        let mut actions = row![
+            action_button(
+                icon_external_link().color(style::WHITE).size(14),
+                "Open",
+                Message::OpenExternal(post.post_view.clone()),
+                style::BLUE_500,
+                style::BLUE_600,
+            ),
+            action_button(
+                icon_download().color(style::WHITE).size(14),
+                "Download",
+                Message::DownloadPost {
+                    post_id: post.id.clone(),
+                    url: post.file_url.clone(),
+                },
+                style::INDIGO_500,
+                style::INDIGO_600,
+            ),
+        ]
+        .spacing(8)
+        .align_y(Center);
+        // Copy-to-clipboard only makes sense for still images (we decode the
+        // file to RGBA); videos/SWF have no single image to hand over.
+        if is_image(&post.file_url) {
+            actions = actions.push(action_button(
+                icon_copy().color(style::WHITE).size(14),
+                "Copy",
+                Message::CopyImage {
+                    post_id: post.id.clone(),
+                    url: post.file_url.clone(),
+                },
+                style::GREEN_500,
+                style::GREEN_600,
+            ));
+        }
+        rows.push(detail_row("Actions", actions.into()));
 
         Column::with_children(rows)
             .spacing(8)
