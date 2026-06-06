@@ -335,8 +335,32 @@ impl Ribb {
         // instead of us guessing the chrome height.
         let area = responsive(move |viewport| self.scroll_area(tab, viewport.height));
 
-        column![self.header(tab), divider, area]
-            .height(Length::Fill)
+        let mut col = column![self.header(tab), divider];
+        // In focus view, a fixed Back bar sits above the scroll area so it's
+        // always reachable regardless of how far the post is scrolled.
+        if let Some(post) = focused_post(tab) {
+            col = col.push(self.focus_bar(post));
+        }
+        col.push(area).height(Length::Fill).into()
+    }
+
+    /// Fixed bar above the focus view with a Back control that returns to the grid.
+    fn focus_bar<'a>(&self, post: &BooruPost) -> El<'a> {
+        let back = button(
+            row![
+                icon_chevron_left().size(18).color(style::WHITE),
+                text("Back").size(14).color(style::WHITE),
+            ]
+            .spacing(6)
+            .align_y(Center),
+        )
+        .padding([4, 12])
+        .on_press(Message::TogglePost(post.id.clone()))
+        .style(pill(style::GRAY_500, style::GRAY_600));
+        container(back)
+            .padding([6, 8])
+            .width(Length::Fill)
+            .style(bg(style::WHITE))
             .into()
     }
 
@@ -349,20 +373,21 @@ impl Ribb {
                     .padding(24)
                     .center_x(Length::Fill),
             );
+        } else if let Some(post) = focused_post(tab) {
+            // Focus view: a single post's detail replaces the whole grid.
+            body = body.push(self.focus_view(tab, post, viewport_h));
         } else {
             body = body.push(self.grid(tab, viewport_h));
-        }
-
-        if let Some(err) = &tab.error {
-            body = body.push(
-                container(text(err.clone()))
-                    .padding(20)
-                    .center_x(Length::Fill),
-            );
-        }
-
-        if tab.query.is_none() {
-            body = body.push(self.empty_state());
+            if let Some(err) = &tab.error {
+                body = body.push(
+                    container(text(err.clone()))
+                        .padding(20)
+                        .center_x(Length::Fill),
+                );
+            }
+            if tab.query.is_none() {
+                body = body.push(self.empty_state());
+            }
         }
 
         scrollable(body)
@@ -500,15 +525,12 @@ impl Ribb {
                 }
             };
 
+            // Clicking a thumbnail opens the post in a full focus view (handled
+            // in `scroll_area`), so the grid is just thumbnails here.
             for post in &tab.posts {
-                if tab.selected.contains(&post.id) {
+                current.push(self.thumbnail(post, cell));
+                if current.len() == cols {
                     flush(&mut current, &mut rows);
-                    rows.push(self.expanded_post(tab, post, size.width, viewport_h));
-                } else {
-                    current.push(self.thumbnail(post, cell));
-                    if current.len() == cols {
-                        flush(&mut current, &mut rows);
-                    }
                 }
             }
             if tab.has_next_page {
@@ -522,6 +544,16 @@ impl Ribb {
             // No outer padding — the grid touches the window edges and the
             // header border (ebb). Only row/cell gaps remain.
             Column::with_children(rows).spacing(GRID_GAP).into()
+        })
+        .into()
+    }
+
+    /// Full-screen detail for a single post (the focus view). Replaces the grid;
+    /// the fixed Back bar above it returns to the grid.
+    fn focus_view<'a>(&'a self, tab: &'a Tab, post: &'a BooruPost, viewport_h: f32) -> El<'a> {
+        responsive(move |size| {
+            self.viewport.set(iced::Size::new(size.width, viewport_h));
+            self.expanded_post(tab, post, size.width, viewport_h)
         })
         .into()
     }
@@ -676,8 +708,9 @@ impl Ribb {
         };
 
         let mut stack = Column::new().spacing(8).width(Length::Fill);
-        // ebb left-aligns the expanded image (max-w-full, no centering).
-        let mut media_container = container(media).width(Length::Fill);
+        // Center the media horizontally in the focus view (SWF already fills the
+        // width, so it only really affects images/video sized to their own dims).
+        let mut media_container = container(media).center_x(Length::Fill);
         // Tag the post we're scrolling to so the centering operation can read
         // this image's exact laid-out bounds.
         if self.scroll_anchor.as_deref() == Some(post.id.as_str()) {

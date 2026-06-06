@@ -142,6 +142,9 @@ struct Tab {
     scroll_id: Id,
     /// Last observed vertical scroll offset for this tab.
     scroll_y: f32,
+    /// Grid scroll offset saved when entering a post's focus view, so exiting
+    /// returns to exactly where the grid was.
+    grid_scroll_y: f32,
 }
 
 impl Tab {
@@ -171,6 +174,7 @@ impl Tab {
             video: HashMap::new(),
             scroll_id: Id::unique(),
             scroll_y: 0.0,
+            grid_scroll_y: 0.0,
         }
     }
 }
@@ -1102,13 +1106,22 @@ impl Ribb {
     /// Expand/collapse a post in the active tab, loading media as needed.
     fn toggle_post(&mut self, post_id: String) -> Task<Message> {
         let idx = self.active;
-        let tab = &mut self.tabs[idx];
-        if let Some(pos) = tab.selected.iter().position(|id| id == &post_id) {
-            tab.selected.remove(pos);
-            tab.swf.remove(&post_id);
-            tab.video.remove(&post_id);
-            return Task::none();
+        // Exit focus: clear the post and return to the grid where we left it.
+        if let Some(pos) = self.tabs[idx].selected.iter().position(|id| id == &post_id) {
+            {
+                let tab = &mut self.tabs[idx];
+                tab.selected.remove(pos);
+                tab.swf.remove(&post_id);
+                tab.video.remove(&post_id);
+                tab.scroll_y = tab.grid_scroll_y;
+            }
+            return self.defer_active_restore();
         }
+        // Enter focus: remember the grid scroll position to come back to.
+        if self.tabs[idx].selected.is_empty() {
+            self.tabs[idx].grid_scroll_y = self.tabs[idx].scroll_y;
+        }
+        let tab = &mut self.tabs[idx];
         tab.selected.push(post_id.clone());
 
         let Some(post) = tab.posts.iter().find(|p| p.id == post_id).cloned() else {
@@ -1442,6 +1455,13 @@ fn sanitize_extension(ext: &str) -> String {
         .filter(|c| c.is_ascii_alphanumeric())
         .take(12)
         .collect()
+}
+
+/// The post a tab is currently focused on (its detail replaces the grid), if
+/// any. `selected` holds at most one entry in the focus-view model.
+fn focused_post(tab: &Tab) -> Option<&BooruPost> {
+    let id = tab.selected.last()?;
+    tab.posts.iter().find(|p| &p.id == id)
 }
 
 /// The thumbnail URL ebb's `PostPreview` would pick: first displayable image
