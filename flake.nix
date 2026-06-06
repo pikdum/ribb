@@ -1,6 +1,13 @@
 {
   description = "ribb — rust iced booru browser (iced GUI, ffmpeg video, Ruffle SWF)";
 
+  nixConfig = {
+    extra-substituters = [ "https://ribb.cachix.org" ];
+    extra-trusted-public-keys = [
+      "ribb.cachix.org-1:nj76tnyKG03zK7d1VSa3XuSaVJxYrs5l4j42uVoj7RU="
+    ];
+  };
+
   # Outputs: `ribb` (native, wrapped), `appimage`, `ribb-windows` (static .exe).
   #
   # The hard part is Ruffle (via iced_ruffle). Three things tamed below:
