@@ -18,7 +18,7 @@ use iced::widget::{
 use iced::{Border, Center, Color, ContentFit, Element, Length, Size, Subscription, Task, Theme};
 use iced_ruffle::{Ruffle, RufflePlayer};
 use lucide_icons::iced::{
-    icon_check, icon_chevron_left, icon_chevron_right, icon_copy, icon_download,
+    icon_arrow_left, icon_check, icon_chevron_left, icon_chevron_right, icon_copy, icon_download,
     icon_external_link, icon_pause, icon_play, icon_plus, icon_search, icon_settings,
     icon_volume_2, icon_volume_x, icon_x,
 };

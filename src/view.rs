@@ -85,6 +85,14 @@ fn active_tab_close(
     }
 }
 
+fn focus_back_button(post: &BooruPost) -> El<'_> {
+    button(icon_box(icon_arrow_left().size(19).color(style::WHITE), 34.0))
+    .padding(0)
+    .on_press(Message::TogglePost(post.id.clone()))
+    .style(solid(style::INDIGO_500, style::INDIGO_600))
+    .into()
+}
+
 /// A solid colored pill button (fully rounded), with a hover/pressed shade.
 fn pill(
     bg: Color,
@@ -335,32 +343,8 @@ impl Ribb {
         // instead of us guessing the chrome height.
         let area = responsive(move |viewport| self.scroll_area(tab, viewport.height));
 
-        let mut col = column![self.header(tab), divider];
-        // In focus view, a fixed Back bar sits above the scroll area so it's
-        // always reachable regardless of how far the post is scrolled.
-        if let Some(post) = focused_post(tab) {
-            col = col.push(self.focus_bar(post));
-        }
-        col.push(area).height(Length::Fill).into()
-    }
-
-    /// Fixed bar above the focus view with a Back control that returns to the grid.
-    fn focus_bar<'a>(&self, post: &BooruPost) -> El<'a> {
-        let back = button(
-            row![
-                icon_chevron_left().size(18).color(style::WHITE),
-                text("Back").size(14).color(style::WHITE),
-            ]
-            .spacing(6)
-            .align_y(Center),
-        )
-        .padding([4, 12])
-        .on_press(Message::TogglePost(post.id.clone()))
-        .style(pill(style::GRAY_500, style::GRAY_600));
-        container(back)
-            .padding([6, 8])
-            .width(Length::Fill)
-            .style(bg(style::WHITE))
+        column![self.header(tab), divider, area]
+            .height(Length::Fill)
             .into()
     }
 
@@ -440,9 +424,16 @@ impl Ribb {
         .text_size(15);
 
         // Everything on one row (ebb's header), search input flexing to fill.
-        let bar = row![input, submit, pager, site_select, rating_select]
-            .spacing(8)
-            .align_y(Center);
+        let mut bar = Row::new().spacing(8).align_y(Center);
+        if let Some(post) = focused_post(tab) {
+            bar = bar.push(focus_back_button(post));
+        }
+        let bar = bar
+            .push(input)
+            .push(submit)
+            .push(pager)
+            .push(site_select)
+            .push(rating_select);
 
         let mut form = column![bar].spacing(8);
         if !tab.autocomplete.is_empty() {
@@ -547,7 +538,7 @@ impl Ribb {
     }
 
     /// Full-screen detail for a single post (the focus view). Replaces the grid;
-    /// the fixed Back bar above it returns to the grid.
+    /// the header Back button returns to the grid.
     fn focus_view<'a>(&'a self, tab: &'a Tab, post: &'a BooruPost, viewport_h: f32) -> El<'a> {
         responsive(move |size| {
             self.viewport.set(iced::Size::new(size.width, viewport_h));
