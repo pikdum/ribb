@@ -78,16 +78,10 @@ wgpu = "27"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 # `swf 0.2.2` is pulled from two sources — crates.io (by Ruffle's build-time
-# `rascal` compiler) and Ruffle's git workspace — and that duplicate can't be
-# vendored offline for nix (the two collide; and a git [patch] can't be resolved
-# from an offline vendor — cargo bypasses source-replacement for patches). So
-# point BOTH sources at one vendored copy of swf (path deps need no git). The
-# copy under vendor/swf is Ruffle's swf 0.2.2 with workspace inheritance inlined.
+# `rascal` compiler) and Ruffle's git workspace. Point both sources at the same
+# rev-pinned Ruffle git crate so nix vendoring sees one package identity.
 [patch.crates-io]
-swf = { path = "vendor/swf" }
-
-[patch."https://github.com/ruffle-rs/ruffle"]
-swf = { path = "vendor/swf" }
+swf = { git = "https://github.com/ruffle-rs/ruffle", rev = "5d1d2134e0254ab9bbc3de231fe0015c37eff9cb" }
 
 # Release tuning, aimed mainly at the static Windows .exe but a win everywhere.
 # Deliberately keeps opt-level = 3: ribb's image-grid decode (the `image` crate)
