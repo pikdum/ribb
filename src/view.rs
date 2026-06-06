@@ -634,15 +634,11 @@ impl Ribb {
 
         let media: El<'a> = if is_image(&post.file_url) {
             match self.images.get(&post.file_url, ImageKind::Full) {
-                Some(ImageState::Loaded(handle)) => mouse_area(
-                    image(handle.clone())
-                        .content_fit(ContentFit::Contain)
-                        .width(Length::Fixed(render_w))
-                        .height(Length::Fixed(render_h)),
-                )
-                .on_press(Message::TogglePost(post.id.clone()))
-                .interaction(iced::mouse::Interaction::Pointer)
-                .into(),
+                Some(ImageState::Loaded(handle)) => image(handle.clone())
+                    .content_fit(ContentFit::Contain)
+                    .width(Length::Fixed(render_w))
+                    .height(Length::Fixed(render_h))
+                    .into(),
                 Some(ImageState::Failed) => container(text("Failed to load image."))
                     .height(Length::Fixed(240.0))
                     .center_x(Length::Fill)
@@ -663,12 +659,7 @@ impl Ribb {
                             .height(Length::Fixed(media_h)),
                     )
                     .style(bg(style::BLACK));
-                    // A square close button flush under the movie (SWF has no
-                    // other controls), centered.
-                    column![movie, swf_close(post)]
-                        .width(Length::Fill)
-                        .align_x(Center)
-                        .into()
+                    movie.into()
                 }
                 None => container(text("Loading Flash…").color(style::BLUE_500))
                     .height(Length::Fixed(media_h))
@@ -710,16 +701,6 @@ impl Ribb {
         // width, so it only really affects images/video sized to their own dims).
         let media_container = container(media).center_x(Length::Fill);
         stack = stack.push(media_container);
-
-        // Images collapse on click. SWF and video carry their own close button
-        // flush under the media (square X / controls bar). Anything else (an
-        // unknown type) still gets the explicit fallback Close button.
-        if !is_image(&post.file_url) && !is_video(&post.file_url) && !is_swf(&post.file_url) {
-            let close = button(text(format!("Close {}", post.id)).color(style::WHITE))
-                .on_press(Message::TogglePost(post.id.clone()))
-                .style(solid(style::BLUE_500, style::BLUE_600));
-            stack = stack.push(container(close).center_x(Length::Fill));
-        }
 
         stack.push(self.post_details(tab, post, avail)).into()
     }
@@ -913,32 +894,8 @@ impl Ribb {
     }
 }
 
-/// A square close button flush under an SWF movie (its only control), styled
-/// like the X in the video controls bar.
-fn swf_close<'a>(post: &BooruPost) -> El<'a> {
-    button(icon_box(icon_x().size(18).color(style::WHITE), 32.0))
-        .padding(0)
-        .on_press(Message::TogglePost(post.id.clone()))
-        .style(|_theme, status| {
-            let bg = match status {
-                iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
-                    style::GRAY_600
-                }
-                _ => style::GRAY_700,
-            };
-            iced::widget::button::Style {
-                background: Some(bg.into()),
-                text_color: style::WHITE,
-                // A sharp square, not the rounded `solid` pill.
-                border: iced::border::rounded(0.0),
-                ..iced::widget::button::Style::default()
-            }
-        })
-        .into()
-}
-
 /// The controls bar shown flush under a playing video: play/pause, mute, a seek
-/// slider, and an X to close (the video's replacement for the "Close" button).
+/// slider.
 fn video_controls<'a>(post: &BooruPost, player: &Player, width: f32) -> El<'a> {
     let id = post.id.clone();
 
@@ -971,13 +928,8 @@ fn video_controls<'a>(post: &BooruPost, player: &Player, width: f32) -> El<'a> {
     })
     .width(Length::Fill);
 
-    let close = button(icon_box(icon_x().size(16).color(style::WHITE), 28.0))
-        .padding(0)
-        .on_press(Message::TogglePost(id.clone()))
-        .style(ghost);
-
     container(
-        row![play, mute, seek, close]
+        row![play, mute, seek]
             .spacing(8)
             .align_y(Center)
             .width(Length::Fill),
