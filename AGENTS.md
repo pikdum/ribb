@@ -46,8 +46,8 @@ iced re-runs `view()` constantly, so images must be fetched/decoded once and cac
 - All image/SWF fetches send `Referer: <the URL itself>` to defeat hotlink protection (Gelbooru's CDN 302s to an HTML page otherwise) — mirrors ebb's `onBeforeSendHeaders`.
 
 ### Notable iced patterns to preserve
-- **Exact scroll-to-center**: expanding a post sets `scroll_anchor`; `view` tags that post's image container with `anchor_id`; a `CenterOnAnchor` widget operation (run via `iced::advanced::widget::operate`) reads the real laid-out bounds and computes the offset. Don't reintroduce geometry estimates.
-- The scroll viewport size is measured by a `responsive` wrapper and stashed in a `Cell<Size>` for `update` to read.
+- **Focus mode**: clicking a thumbnail replaces the grid with a single post detail view. The Back control exits focus mode and restores the saved grid scroll offset.
+- The content viewport size is measured by a `responsive` wrapper and stashed in a `Cell<Size>` for full-image sizing.
 - **Settings modal**: an always-present `stack` overlay (empty 0-size layer when closed — toggling the layer in/out would reset the scrollable's offset). A `mouse_area` scrim absorbs background clicks (`Message::Noop`); only X/Cancel/Save close it.
 - Video is intentionally **stubbed** (would need ffmpeg); SWF plays via `iced_ruffle`.
 

@@ -331,7 +331,7 @@ impl Ribb {
         });
 
         // `responsive` measures the exact space left for the scroll area (the
-        // content viewport), so the expanded image can fill it precisely
+        // content viewport), so focused media can fill it precisely
         // instead of us guessing the chrome height.
         let area = responsive(move |viewport| self.scroll_area(tab, viewport.height));
 
@@ -510,9 +510,7 @@ impl Ribb {
 
     fn grid<'a>(&'a self, tab: &'a Tab, viewport_h: f32) -> El<'a> {
         responsive(move |size| {
-            // Record the exact content-area size for precise scroll math in
-            // `update` (the grid's width is the true content width, after any
-            // scrollbar; the height comes from the outer responsive).
+            // Record the exact content-area size for full-image decode sizing.
             self.viewport.set(iced::Size::new(size.width, viewport_h));
             let cols = grid_cols(size.width);
             let cell = grid_cell(size.width, cols);
@@ -553,7 +551,7 @@ impl Ribb {
     fn focus_view<'a>(&'a self, tab: &'a Tab, post: &'a BooruPost, viewport_h: f32) -> El<'a> {
         responsive(move |size| {
             self.viewport.set(iced::Size::new(size.width, viewport_h));
-            self.expanded_post(tab, post, size.width, viewport_h)
+            self.focused_post_content(tab, post, size.width, viewport_h)
         })
         .into()
     }
@@ -620,7 +618,7 @@ impl Ribb {
         .into()
     }
 
-    fn expanded_post<'a>(
+    fn focused_post_content<'a>(
         &'a self,
         tab: &'a Tab,
         post: &'a BooruPost,
@@ -710,12 +708,7 @@ impl Ribb {
         let mut stack = Column::new().spacing(8).width(Length::Fill);
         // Center the media horizontally in the focus view (SWF already fills the
         // width, so it only really affects images/video sized to their own dims).
-        let mut media_container = container(media).center_x(Length::Fill);
-        // Tag the post we're scrolling to so the centering operation can read
-        // this image's exact laid-out bounds.
-        if self.scroll_anchor.as_deref() == Some(post.id.as_str()) {
-            media_container = media_container.id(self.anchor_id.clone());
-        }
+        let media_container = container(media).center_x(Length::Fill);
         stack = stack.push(media_container);
 
         // Images collapse on click. SWF and video carry their own close button

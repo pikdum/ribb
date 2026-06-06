@@ -10,15 +10,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use iced::advanced::widget::{operation, Id};
+use iced::advanced::widget::Id;
 use iced::widget::{
     button, column, container, image, mouse_area, pick_list, responsive, row, scrollable, stack,
     text, text_input, Column, Row, Space,
 };
-use iced::{
-    Border, Center, Color, ContentFit, Element, Length, Rectangle, Size, Subscription, Task, Theme,
-    Vector,
-};
+use iced::{Border, Center, Color, ContentFit, Element, Length, Size, Subscription, Task, Theme};
 use iced_ruffle::{Ruffle, RufflePlayer};
 use lucide_icons::iced::{
     icon_check, icon_chevron_left, icon_chevron_right, icon_copy, icon_download,
@@ -74,17 +71,12 @@ pub struct Ribb {
     images: ImageCache,
     /// Caps concurrent image fetch/decode jobs (shared by all fetch Tasks).
     image_sem: Arc<tokio::sync::Semaphore>,
-    /// Id attached to the image of the post we want to center; an operation
-    /// reads its laid-out bounds to compute the exact scroll offset.
-    anchor_id: Id,
-    /// Post id currently carrying `anchor_id` (the one to scroll to).
-    scroll_anchor: Option<String>,
     /// Tab whose saved scroll offset is about to be restored after activation.
     pending_scroll_restore: Option<u64>,
     /// Latest keyboard modifier state; used for Ctrl+click tag behavior.
     modifiers: iced::keyboard::Modifiers,
-    /// Exact content-area (scroll viewport) size, measured by the view's
-    /// `responsive` wrapper and read back here for precise scroll math.
+    /// Exact content-area size, measured by the view's `responsive` wrapper and
+    /// read back here for full-image sizing.
     viewport: Cell<Size>,
     window: Size,
     /// Lazily-opened system clipboard for the "Copy" image action. Held alive
@@ -124,8 +116,8 @@ struct Tab {
     page: u32,
     posts: Vec<BooruPost>,
     has_next_page: bool,
-    /// Post IDs currently expanded to their detail view.
-    selected: Vec<String>,
+    /// Post currently replacing the grid in focus mode.
+    focused: Option<String>,
     loading: bool,
     error: Option<String>,
     /// Live tag suggestions for the last word being typed.
@@ -164,7 +156,7 @@ impl Tab {
             page: 0,
             posts: Vec::new(),
             has_next_page: false,
-            selected: Vec::new(),
+            focused: None,
             loading: false,
             error: None,
             autocomplete: Vec::new(),
@@ -307,11 +299,6 @@ pub enum Message {
         tab: u64,
         y: f32,
     },
-    /// Computed scroll offset (content-space y) to center an expanded post.
-    ScrollComputed {
-        tab: u64,
-        y: f32,
-    },
 }
 
 /// A rating choice in the selector, including the "All Content" (`None`) option.
@@ -347,8 +334,6 @@ impl Ribb {
             next_tab_id: 1,
             images: ImageCache::default(),
             image_sem: Arc::new(tokio::sync::Semaphore::new(IMAGE_CONCURRENCY)),
-            anchor_id: Id::unique(),
-            scroll_anchor: None,
             pending_scroll_restore: None,
             modifiers: iced::keyboard::Modifiers::default(),
             viewport: Cell::new(Size::new(1100.0, 700.0)),
@@ -546,14 +531,6 @@ impl Ribb {
                     })
                     .unwrap_or_else(Task::none)
             }
-            Message::ScrollComputed { tab, y } => self
-                .tab_index(tab)
-                .map(|idx| {
-                    self.tabs[idx].scroll_y = y;
-                    self.scroll_tab_to(idx, y)
-                })
-                .unwrap_or_else(Task::none),
-
             // --- Tabs ---------------------------------------------------
             Message::NewTab => self.push_tab(None, true),
             Message::SelectTab(idx) => {
@@ -1020,7 +997,7 @@ impl Ribb {
                 let tab = &mut self.tabs[idx];
                 tab.posts = page.posts;
                 tab.has_next_page = page.has_next_page;
-                tab.selected.clear();
+                tab.focused = None;
                 tab.swf.clear();
                 tab.video.clear();
                 tab.loading = false;
@@ -1033,7 +1010,7 @@ impl Ribb {
                 let urls: Vec<String> = tab.posts.iter().filter_map(preview_url).collect();
                 let mut task = self.load_images(urls, Some(THUMB_MAX), ImageKind::Thumbnail);
 
-                // Debug: auto-expand a post (prefer an SWF) to exercise the
+                // Debug: auto-focus a post (prefer an SWF) to exercise the
                 // detail view, full-image, and Ruffle paths headlessly.
                 if std::env::var("RIBB_DEBUG_EXPAND").is_ok() {
                     let tab = &self.tabs[idx];
@@ -1044,7 +1021,7 @@ impl Ribb {
                         .or_else(|| tab.posts.first())
                         .map(|p| p.id.clone());
                     if let Some(id) = target {
-                        tracing::info!("debug: auto-expanding post {id}");
+                        tracing::info!("debug: auto-focusing post {id}");
                         task = Task::batch([task, Task::done(Message::TogglePost(id))]);
                     }
                 }
@@ -1069,7 +1046,7 @@ impl Ribb {
                     tracing::error!(tab = tab_id, "fetch failed: {msg}");
                     let tab = &mut self.tabs[idx];
                     tab.posts.clear();
-                    tab.selected.clear();
+                    tab.focused = None;
                     tab.swf.clear();
                     tab.video.clear();
                     tab.has_next_page = false;
@@ -1103,14 +1080,14 @@ impl Ribb {
         )
     }
 
-    /// Expand/collapse a post in the active tab, loading media as needed.
+    /// Enter/exit focus mode for a post in the active tab, loading media as needed.
     fn toggle_post(&mut self, post_id: String) -> Task<Message> {
         let idx = self.active;
         // Exit focus: clear the post and return to the grid where we left it.
-        if let Some(pos) = self.tabs[idx].selected.iter().position(|id| id == &post_id) {
+        if self.tabs[idx].focused.as_deref() == Some(post_id.as_str()) {
             {
                 let tab = &mut self.tabs[idx];
-                tab.selected.remove(pos);
+                tab.focused = None;
                 tab.swf.remove(&post_id);
                 tab.video.remove(&post_id);
                 tab.scroll_y = tab.grid_scroll_y;
@@ -1118,17 +1095,16 @@ impl Ribb {
             return self.defer_active_restore();
         }
         // Enter focus: remember the grid scroll position to come back to.
-        if self.tabs[idx].selected.is_empty() {
+        if self.tabs[idx].focused.is_none() {
             self.tabs[idx].grid_scroll_y = self.tabs[idx].scroll_y;
         }
         let tab = &mut self.tabs[idx];
-        tab.selected.push(post_id.clone());
+        tab.focused = Some(post_id.clone());
 
         let Some(post) = tab.posts.iter().find(|p| p.id == post_id).cloned() else {
             return Task::none();
         };
         let tab_id = tab.id;
-        let scroll_id = tab.scroll_id.clone();
         let mut tasks = Vec::new();
 
         // Resolve category-grouped tags (inline for most providers; a fetch for
@@ -1152,7 +1128,7 @@ impl Ribb {
                 native_w = post.width,
                 native_h = post.height,
                 decode_cap = cap,
-                "expanding full image: {}",
+                "loading focus image: {}",
                 post.file_url
             );
             tasks.push(self.load_images(vec![post.file_url.clone()], Some(cap), ImageKind::Full));
@@ -1182,14 +1158,6 @@ impl Ribb {
             ));
         }
 
-        // Mark this post as the scroll anchor; the view tags its image with
-        // `anchor_id`, then the operation reads the laid-out bounds and we
-        // scroll to center it (exact for any number of expanded posts).
-        self.scroll_anchor = Some(post.id.clone());
-        tasks.push(
-            iced::advanced::widget::operate(CenterOnAnchor::new(self.anchor_id.clone(), scroll_id))
-                .map(move |y| Message::ScrollComputed { tab: tab_id, y }),
-        );
         Task::batch(tasks)
     }
 
@@ -1229,64 +1197,6 @@ impl Ribb {
             }
         }
         Task::batch(tasks)
-    }
-}
-
-/// A widget operation that finds the laid-out bounds of the anchored image and
-/// the scroll viewport, then computes the scroll offset that centers the image.
-/// Content child bounds are reported untranslated (relative to the scrollable's
-/// top), so the content-space y is simply `anchor.y - scrollable.y`.
-struct CenterOnAnchor {
-    anchor: Id,
-    scroll: Id,
-    anchor_bounds: Option<Rectangle>,
-    scroll_bounds: Option<Rectangle>,
-}
-
-impl CenterOnAnchor {
-    fn new(anchor: Id, scroll: Id) -> Self {
-        Self {
-            anchor,
-            scroll,
-            anchor_bounds: None,
-            scroll_bounds: None,
-        }
-    }
-}
-
-impl operation::Operation<f32> for CenterOnAnchor {
-    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn operation::Operation<f32>)) {
-        operate(self);
-    }
-
-    fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
-        if id == Some(&self.anchor) {
-            self.anchor_bounds = Some(bounds);
-        }
-    }
-
-    fn scrollable(
-        &mut self,
-        id: Option<&Id>,
-        bounds: Rectangle,
-        _content_bounds: Rectangle,
-        _translation: Vector,
-        _state: &mut dyn operation::Scrollable,
-    ) {
-        if id == Some(&self.scroll) {
-            self.scroll_bounds = Some(bounds);
-        }
-    }
-
-    fn finish(&self) -> operation::Outcome<f32> {
-        match (self.anchor_bounds, self.scroll_bounds) {
-            (Some(a), Some(s)) => {
-                let content_y = a.y - s.y;
-                let offset = (content_y - (s.height - a.height) / 2.0).max(0.0);
-                operation::Outcome::Some(offset)
-            }
-            _ => operation::Outcome::None,
-        }
     }
 }
 
@@ -1457,10 +1367,9 @@ fn sanitize_extension(ext: &str) -> String {
         .collect()
 }
 
-/// The post a tab is currently focused on (its detail replaces the grid), if
-/// any. `selected` holds at most one entry in the focus-view model.
+/// The post a tab is currently focused on (its detail replaces the grid), if any.
 fn focused_post(tab: &Tab) -> Option<&BooruPost> {
-    let id = tab.selected.last()?;
+    let id = tab.focused.as_ref()?;
     tab.posts.iter().find(|p| &p.id == id)
 }
 
