@@ -1385,15 +1385,9 @@ fn focused_post(tab: &Tab) -> Option<&BooruPost> {
     tab.posts.iter().find(|p| &p.id == id)
 }
 
-/// The thumbnail URL ebb's `PostPreview` would pick: first displayable image
-/// among sample → preview → file, skipping known placeholders.
+/// just pick preview url - gelbooru blocks using samples here
 fn preview_url(post: &BooruPost) -> Option<String> {
-    let mut candidates: Vec<&str> = Vec::new();
-    if let Some(s) = &post.sample_url {
-        candidates.push(s);
-    }
-    candidates.push(&post.preview_url);
-    candidates.push(&post.file_url);
+    let candidates: Vec<&str> = vec![&post.preview_url];
     candidates
         .into_iter()
         .filter(|u| !u.is_empty() && !PREVIEW_BLACKLIST.contains(u))
