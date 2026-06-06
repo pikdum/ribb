@@ -1094,23 +1094,34 @@ impl Ribb {
             }
             return self.defer_active_restore();
         }
-        // Enter focus: remember the grid scroll position to come back to.
-        if self.tabs[idx].focused.is_none() {
-            self.tabs[idx].grid_scroll_y = self.tabs[idx].scroll_y;
-        }
-        let tab = &mut self.tabs[idx];
-        tab.focused = Some(post_id.clone());
-
-        let Some(post) = tab.posts.iter().find(|p| p.id == post_id).cloned() else {
+        let entering_from_grid = self.tabs[idx].focused.is_none();
+        let Some(post) = self.tabs[idx]
+            .posts
+            .iter()
+            .find(|p| p.id == post_id)
+            .cloned()
+        else {
             return Task::none();
         };
-        let tab_id = tab.id;
+
+        // Enter focus: remember the grid scroll position to come back to, then
+        // start the focused detail view at the top.
+        {
+            let tab = &mut self.tabs[idx];
+            if entering_from_grid {
+                tab.grid_scroll_y = tab.scroll_y;
+            }
+            tab.focused = Some(post_id.clone());
+            tab.scroll_y = 0.0;
+        }
+
+        let tab_id = self.tabs[idx].id;
         let mut tasks = Vec::new();
 
         // Resolve category-grouped tags (inline for most providers; a fetch for
         // Gelbooru). Mirrors ebb's PostDetails `getTagGroups` on mount.
         let client = self.client.clone();
-        let site = tab.site;
+        let site = self.tabs[idx].site;
         let post_for_groups = post.clone();
         let gid = post_id.clone();
         tasks.push(Task::perform(
@@ -1158,6 +1169,7 @@ impl Ribb {
             ));
         }
 
+        tasks.push(self.defer_active_restore());
         Task::batch(tasks)
     }
 
@@ -1438,6 +1450,34 @@ mod tests {
         };
         // Sample (image) wins over the blacklisted preview and the webm file.
         assert_eq!(preview_url(&post).as_deref(), Some("https://x/s.jpg"));
+    }
+
+    #[test]
+    fn focus_mode_starts_at_top_and_restores_grid_scroll() {
+        let mut app = Ribb::new();
+        app.tabs[0].scroll_y = 420.0;
+        app.tabs[0].posts.push(BooruPost {
+            id: "1".into(),
+            post_view: String::new(),
+            tags: vec![],
+            tag_groups: vec![],
+            file_url: "https://x/a.bin".into(),
+            preview_url: String::new(),
+            sample_url: None,
+            width: 100,
+            height: 100,
+            rating: "general".into(),
+            created_at: String::new(),
+        });
+
+        let _ = app.toggle_post("1".into());
+        assert_eq!(app.tabs[0].focused.as_deref(), Some("1"));
+        assert_eq!(app.tabs[0].grid_scroll_y, 420.0);
+        assert_eq!(app.tabs[0].scroll_y, 0.0);
+
+        let _ = app.toggle_post("1".into());
+        assert_eq!(app.tabs[0].focused, None);
+        assert_eq!(app.tabs[0].scroll_y, 420.0);
     }
 
     #[test]
