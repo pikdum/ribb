@@ -72,7 +72,7 @@ tempfile = "3"
 # wlroots compositors; arboard still falls back to X11/XWayland elsewhere.
 arboard = { version = "3", features = ["wayland-data-control"] }
 # Same wgpu as iced 0.14 (unifies to one instance) for the custom video shader.
-wgpu = "27"
+wgpu = "30"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
