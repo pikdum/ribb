@@ -81,9 +81,9 @@
         };
 
         # Decode-only ffmpeg. ribb only ever DECODES webm (matroska → vp8/vp9/av1)
-        # and mp4 (mov → h264/hevc) plus their audio (aac/opus/vorbis/mp3/flac) —
-        # `is_video` matches only those two extensions; everything else (jpg/png/
-        # gif/webp) goes through the `image` crate, never ffmpeg. It never encodes,
+        # and mp4 (mov → h264/hevc) plus their audio (aac/opus/vorbis/mp3/flac),
+        # and GIF animations. Still images (jpg/png/webp) and image previews go
+        # through the `image` crate. FFmpeg never encodes,
         # muxes, filters, or touches the network. So `--disable-everything` + a
         # tight allowlist drops the hundreds of unused codecs/muxers/protocols.
         # The built-in video decoders need no external codec lib, so the
@@ -92,16 +92,17 @@
         ffmpegDecodeFlags = [
           "--disable-everything"
           "--enable-protocol=file"
-          "--enable-demuxer=mov,matroska"
-          "--enable-decoder=h264,hevc,vp8,vp9,av1,mpeg4,mjpeg"
+          "--enable-demuxer=mov,matroska,gif"
+          "--enable-decoder=h264,hevc,vp8,vp9,av1,mpeg4,mjpeg,gif"
           "--enable-decoder=aac,aac_latm,mp3,vorbis,opus,flac,ac3,alac,pcm_s16le,pcm_s16be,pcm_u8,pcm_f32le,pcm_f32be"
-          "--enable-parser=h264,hevc,vp8,vp9,av1,mpeg4video,aac,aac_latm,vorbis,opus,mpegaudio,flac,ac3"
+          "--enable-parser=h264,hevc,vp8,vp9,av1,mpeg4video,gif,aac,aac_latm,vorbis,opus,mpegaudio,flac,ac3"
           "--enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,vp9_superframe_split,vp9_raw_reorder,av1_frame_split,aac_adtstoasc,mpeg4_unpack_bframes,extract_extradata"
         ];
 
+        # Stay on FFmpeg 8 for ffmpeg-next 8's libav bindings.
         # Native decode-only build: ffmpeg-headless (no SDL/X11/etc.) trimmed to
         # the allowlist above. ffmpeg-sys-next links it dynamically.
-        ffmpegNative = pkgs.ffmpeg-headless.overrideAttrs (old: {
+        ffmpegNative = pkgs.ffmpeg_8-headless.overrideAttrs (old: {
           configureFlags = (old.configureFlags or [ ]) ++ ffmpegDecodeFlags;
           # ffmpeg's own test binaries (e.g. libavfilter/tests/integral) reference
           # symbols from filters that --disable-everything removed, so the check
@@ -229,7 +230,7 @@
           }).pkgsCross.mingwW64;
 
         ffmpegStatic =
-          (crossPkgs.ffmpeg-headless.override {
+          (crossPkgs.ffmpeg_8-headless.override {
             withHeadlessDeps = false;
             buildAvcodec = true;
             buildAvformat = true;

@@ -18,7 +18,9 @@ Git hooks (configured in `devenv.nix`, run on commit) act as CI: **clippy `--all
 
 ## Validating the GUI (no screenshots)
 
-This environment can render an iced window but cannot capture it. Validate GUI changes by: (1) it builds, (2) running with debug env vars and reading `tracing` logs (`RUST_LOG=ribb=debug`). Do not attempt screenshots.
+This environment can render an iced window but cannot capture it. Validate GUI changes by: (1) it builds, (2) running with debug env vars and reading `tracing` logs (`RUST_LOG=ribb=debug`). For video/GIF/SWF checks, use `ICED_BACKEND=wgpu` so a GPU startup failure cannot silently fall back to tiny-skia, which cannot draw custom shaders. Do not attempt screenshots.
+
+If Vulkan reports no adapters after a NixOS update, check `VK_LOADER_DEBUG=error`: the project Nixpkgs pins must provide a glibc new enough for the host Mesa driver. Refresh both `devenv.lock` and `flake.lock` when needed; keep FFmpeg on major 8 to match `ffmpeg-next`.
 
 - `RIBB_DEBUG_QUERY="tags"` — run a search on launch (rating filter off)
 - `RIBB_DEBUG_EXPAND=1` — auto-expand a post (prefers an SWF), exercising detail / full-image / Ruffle paths
@@ -49,7 +51,7 @@ iced re-runs `view()` constantly, so images must be fetched/decoded once and cac
 - **Focus mode**: clicking a thumbnail replaces the grid with a single post detail view. The Back control exits focus mode and restores the saved grid scroll offset.
 - The content viewport size is measured by a `responsive` wrapper and stashed in a `Cell<Size>` for full-image sizing.
 - **Settings modal**: an always-present `stack` overlay (empty 0-size layer when closed — toggling the layer in/out would reset the scrollable's offset). A `mouse_area` scrim absorbs background clicks (`Message::Noop`); only X/Cancel/Save close it.
-- Video is intentionally **stubbed** (would need ffmpeg); SWF plays via `iced_ruffle`.
+- Video and GIF playback share the FFmpeg decoder and wgpu shader, with cpal for video audio; SWF plays via `iced_ruffle`.
 
 ### Constraints
 iced is pinned to **0.14** (with `wgpu` + `advanced` features) because `iced_ruffle` (the SWF widget, a git dependency on `github.com/pikdum/iced_ruffle`) must resolve to the same wgpu. Ruffle is built from git `master` (needs a JDK + Rust ≥1.95) and audio uses cpal/ALSA — `devenv.nix` provides these and `LD_LIBRARY_PATH` for the winit/wgpu runtime libs. To bump the SWF widget: `cargo update -p iced_ruffle`.

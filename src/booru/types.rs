@@ -233,12 +233,18 @@ fn url_extension(url: &str) -> Option<String> {
         .map(|(_, ext)| ext.to_ascii_lowercase())
 }
 
-/// Whether a URL points at a displayable still image (ebb's `isImage`).
+/// Whether a URL points at a decodable image (ebb's `isImage`).
+/// GIFs use the image cache for previews and the video player in focus mode.
 pub fn is_image(url: &str) -> bool {
     matches!(
         url_extension(url).as_deref(),
         Some("jpg" | "jpeg" | "png" | "gif" | "webp")
     )
+}
+
+/// Whether a URL points at a GIF, which needs frame playback in focus mode.
+pub fn is_gif(url: &str) -> bool {
+    matches!(url_extension(url).as_deref(), Some("gif"))
 }
 
 /// Whether a URL points at a video file (webm/mp4).

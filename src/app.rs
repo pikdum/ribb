@@ -24,8 +24,8 @@ use lucide_icons::iced::{
 };
 
 use crate::booru::{
-    is_image, is_swf, is_video, BooruClient, BooruPost, BooruTag, PostQuery, PostsPage, Rating,
-    Site, TagGroup,
+    is_gif, is_image, is_swf, is_video, BooruClient, BooruPost, BooruTag, PostQuery, PostsPage,
+    Rating, Site, TagGroup,
 };
 use crate::cache::{fetch_bytes, fetch_image, DecodedImage, ImageCache, ImageKind, ImageState};
 use crate::settings::Settings;
@@ -1133,7 +1133,7 @@ impl Ribb {
             },
         ));
 
-        if is_image(&post.file_url) {
+        if is_image(&post.file_url) && !is_gif(&post.file_url) {
             let cap = self.full_image_cap(&post);
             tracing::info!(
                 native_w = post.width,
@@ -1154,7 +1154,9 @@ impl Ribb {
                     bytes,
                 },
             ));
-        } else if is_video(&post.file_url) && !self.tabs[idx].video.contains_key(&post_id) {
+        } else if (is_video(&post.file_url) || is_gif(&post.file_url))
+            && !self.tabs[idx].video.contains_key(&post_id)
+        {
             // Fetch with our own client (booru CDNs reject ffmpeg's default HTTP
             // headers; Gelbooru needs a Referer), then decode from a temp file.
             let http = self.client.http().clone();
@@ -1428,8 +1430,8 @@ mod tests {
     }
 
     #[test]
-    fn preview_url_skips_placeholder_and_non_images() {
-        let post = BooruPost {
+    fn preview_url_keeps_gifs_and_skips_placeholder_and_non_images() {
+        let mut post = BooruPost {
             id: "1".into(),
             post_view: String::new(),
             tags: vec![],
@@ -1442,8 +1444,12 @@ mod tests {
             rating: "general".into(),
             created_at: String::new(),
         };
-        // Sample (image) wins over the blacklisted preview and the webm file.
-        assert_eq!(preview_url(&post).as_deref(), Some("https://x/s.jpg"));
+        // Never fall back to samples: Gelbooru blocks them in the grid.
+        assert_eq!(preview_url(&post), None);
+        post.preview_url = "https://x/p.gif".into();
+        assert_eq!(preview_url(&post).as_deref(), Some("https://x/p.gif"));
+        post.preview_url = "https://x/p.webm".into();
+        assert_eq!(preview_url(&post), None);
     }
 
     #[test]

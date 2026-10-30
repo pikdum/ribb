@@ -75,6 +75,13 @@ impl Primitive for VideoPrimitive {
         // scissor (clip_bounds) merely trims the scrolled-off part. Sizing the
         // viewport to clip_bounds instead would squish the frame into the strip.
         let phys = *bounds * viewport.scale_factor();
+        tracing::trace!(
+            player = self.id,
+            version = self.version,
+            ?bounds,
+            ?phys,
+            "preparing media shader"
+        );
         pipeline.prepare(device, queue, self.id, self.version, frame, phys);
     }
 
@@ -85,6 +92,12 @@ impl Primitive for VideoPrimitive {
         target: &wgpu::TextureView,
         clip_bounds: &Rectangle<u32>,
     ) {
+        tracing::trace!(
+            player = self.id,
+            version = self.version,
+            ?clip_bounds,
+            "rendering media shader"
+        );
         pipeline.render(self.id, encoder, target, clip_bounds);
     }
 }

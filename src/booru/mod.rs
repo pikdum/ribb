@@ -14,8 +14,8 @@ mod rule34;
 pub mod types;
 
 pub use types::{
-    is_image, is_swf, is_video, BooruPost, BooruTag, PostQuery, PostsPage, Rating, TagCategory,
-    TagColor, TagGroup,
+    is_gif, is_image, is_swf, is_video, BooruPost, BooruTag, PostQuery, PostsPage, Rating,
+    TagCategory, TagColor, TagGroup,
 };
 
 /// Errors surfaced by the booru layer.

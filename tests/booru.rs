@@ -4,7 +4,26 @@
 //! JSON (no network, no auth). Live tests hit Danbooru only — it needs no auth
 //! and returns tag groups inline, so it exercises the full path end to end.
 
-use ribb::booru::{BooruClient, PostQuery, Site, TagCategory};
+use ribb::booru::{is_gif, is_image, is_video, BooruClient, PostQuery, Site, TagCategory};
+
+#[test]
+fn gif_urls_support_playback_and_image_previews() {
+    for url in [
+        "https://cdn.example/a.gif",
+        "https://cdn.example/a.GIF?token=1#frame",
+    ] {
+        assert!(is_gif(url));
+        assert!(is_image(url));
+        assert!(!is_video(url));
+    }
+    for url in [
+        "https://cdn.example/a.jpg",
+        "https://cdn.example/a.webm",
+        "https://cdn.example/a.mp4?file=a.gif",
+    ] {
+        assert!(!is_gif(url));
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Offline parse tests (all providers)

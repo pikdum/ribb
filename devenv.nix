@@ -20,7 +20,7 @@ let
     libxrandr
     dbus
     # libav* shared libs for ffmpeg-next (video decode + audio resample).
-    ffmpeg-full
+    ffmpeg_8-full
   ];
 in
 {
@@ -35,9 +35,9 @@ in
     # rfd's file dialog: native portal needs a running xdg-desktop-portal; zenity
     # is rfd's reliable fallback when no portal is available.
     pkgs.zenity
-    # ffmpeg-next links the system libav* via pkg-config; ffmpeg-full carries the
-    # decoders/demuxers (h264/vp9/mp4/webm) and swresample we need.
-    pkgs.ffmpeg-full
+    # ffmpeg-next 8 links libav* via pkg-config; keep the same FFmpeg major.
+    # ffmpeg-full carries the decoders/demuxers and swresample we need.
+    pkgs.ffmpeg_8-full
     # ffmpeg-sys-next runs bindgen, which needs libclang to parse the libav headers.
     pkgs.llvmPackages.libclang
   ];

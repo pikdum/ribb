@@ -1,4 +1,4 @@
-//! A minimal ffmpeg-backed video player widget for iced.
+//! A minimal ffmpeg-backed video and GIF player widget for iced.
 //!
 //! Design: a background thread decodes frames into a bounded queue (see
 //! [`decoder`]); the UI advances a playback clock each frame and presents the
@@ -6,8 +6,8 @@
 //! pared down to a single file. Intended to be extracted into a standalone
 //! `iced_ffmpeg_video_player` crate once the design settles.
 //!
-//! Phase A (current): video only, wall-clock master, presented via
-//! `image::Handle::from_rgba`. Audio (cpal) and a custom wgpu primitive follow.
+//! Audio uses cpal's sample clock; silent inputs (including GIFs) use the wall
+//! clock. A custom wgpu shader presents the decoded RGBA frames.
 
 mod audio;
 mod decoder;
@@ -92,6 +92,12 @@ impl Player {
         // Show the first decoded frame as soon as it exists, regardless of clock.
         if self.current.is_none() {
             if let Some(frame) = self.shared.frames.lock().unwrap().pop_front() {
+                tracing::debug!(
+                    player = self.id,
+                    width = frame.width,
+                    height = frame.height,
+                    "presenting first media frame"
+                );
                 self.current = Some(Arc::new(frame));
                 self.version += 1;
                 return true;
@@ -122,6 +128,14 @@ impl Player {
                 break;
             }
         }
+        tracing::trace!(
+            player = self.id,
+            clock_ms,
+            version = self.version,
+            queued = queue.len(),
+            advanced,
+            "media tick"
+        );
         advanced
     }
 

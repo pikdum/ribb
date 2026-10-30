@@ -340,3 +340,120 @@ fn run(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::codecs::gif::{GifEncoder, Repeat};
+    use image::{Delay, Frame, Rgba, RgbaImage};
+    use std::time::Instant;
+
+    struct GifDecoder {
+        shared: Arc<Shared>,
+        _file: tempfile::NamedTempFile,
+    }
+
+    impl GifDecoder {
+        fn new() -> Self {
+            // No extension, just like Player's downloaded temp files. Distinct
+            // delays and transparent backgrounds exercise GIF timing/disposal.
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            {
+                let mut encoder = GifEncoder::new(&mut file);
+                encoder.set_repeat(Repeat::Infinite).unwrap();
+                for (i, (color, delay)) in [
+                    ([255, 0, 0, 255], 80),
+                    ([0, 255, 0, 255], 160),
+                    ([0, 0, 255, 255], 240),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let mut image = RgbaImage::new(4, 4);
+                    image.put_pixel(i as u32 + 1, 0, Rgba(color));
+                    encoder
+                        .encode_frame(Frame::from_parts(
+                            image,
+                            0,
+                            0,
+                            Delay::from_numer_denom_ms(delay, 1),
+                        ))
+                        .unwrap();
+                }
+            }
+            let shared = spawn(file.path().to_path_buf(), None);
+            Self {
+                shared,
+                _file: file,
+            }
+        }
+
+        fn wait_for(&self, ready: impl Fn(&Shared) -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !ready(&self.shared) {
+                assert!(
+                    Instant::now() < deadline,
+                    "GIF decoder did not produce frames"
+                );
+                thread::sleep(Duration::from_millis(3));
+            }
+        }
+    }
+
+    impl Drop for GifDecoder {
+        fn drop(&mut self) {
+            self.shared.quit.store(true, Ordering::Release);
+        }
+    }
+
+    #[test]
+    fn gif_preserves_frame_timing_transparency_and_loops() {
+        let decoder = GifDecoder::new();
+        decoder.wait_for(|s| s.frames.lock().unwrap().len() >= 6);
+        assert_eq!(decoder.shared.duration_ms.load(Ordering::Acquire), 480);
+        assert!(!decoder.shared.has_audio.load(Ordering::Acquire));
+
+        let frames = decoder.shared.frames.lock().unwrap();
+        let pts: Vec<_> = frames.iter().take(6).map(|f| f.pts_ms).collect();
+        assert_eq!(pts, [0, 80, 240, 480, 560, 720]);
+        for (i, frame) in frames.iter().take(6).enumerate() {
+            assert_eq!((frame.width, frame.height), (4, 4));
+            assert_eq!(frame.data[3], 0, "transparent background");
+            let color = match i % 3 {
+                0 => [255, 0, 0, 255],
+                1 => [0, 255, 0, 255],
+                _ => [0, 0, 255, 255],
+            };
+            let offset = (i % 3 + 1) * 4;
+            assert_eq!(frame.data[offset..offset + 4], color, "frame {i}");
+            for x in 0..4 {
+                if x * 4 != offset {
+                    assert_eq!(frame.data[x * 4 + 3], 0, "disposed pixel {x}, frame {i}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gif_seek_rebases_frames_within_the_current_loop() {
+        let decoder = GifDecoder::new();
+        decoder.wait_for(|s| s.frames.lock().unwrap().len() >= VIDEO_QUEUE_CAP);
+        // Third frame of the second loop: 480 + 240 ms.
+        decoder.shared.seek_target_ms.store(720, Ordering::Release);
+        decoder.shared.seek_gen.fetch_add(1, Ordering::Release);
+        decoder.wait_for(|s| {
+            let frames = s.frames.lock().unwrap();
+            // Seeking may decode from an earlier keyframe to reconstruct the
+            // GIF canvas. Player::tick presents the last frame at the target.
+            frames.len() >= 4
+                && frames
+                    .front()
+                    .is_some_and(|f| (480..=720).contains(&f.pts_ms))
+        });
+        let frames = decoder.shared.frames.lock().unwrap();
+        let target = frames.iter().position(|f| f.pts_ms == 720).unwrap();
+        assert_eq!(frames[target].data[12..16], [0, 0, 255, 255]);
+        assert_eq!(frames[target + 1].pts_ms, 960);
+        assert_eq!(frames[target + 1].data[4..8], [255, 0, 0, 255]);
+    }
+}

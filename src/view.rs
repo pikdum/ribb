@@ -623,7 +623,7 @@ impl Ribb {
         // images aren't letterboxed into a tall fixed box (ebb sizes to content).
         let (render_w, render_h) = render_size(post.width, post.height, avail - 8.0, max_h);
 
-        let media: El<'a> = if is_image(&post.file_url) {
+        let media: El<'a> = if is_image(&post.file_url) && !is_gif(&post.file_url) {
             match self.images.get(&post.file_url, ImageKind::Full) {
                 Some(ImageState::Loaded(handle)) => image(handle.clone())
                     .content_fit(ContentFit::Contain)
@@ -658,7 +658,7 @@ impl Ribb {
                     .center_y(Length::Fixed(media_h))
                     .into(),
             }
-        } else if is_video(&post.file_url) {
+        } else if is_video(&post.file_url) || is_gif(&post.file_url) {
             // Size to the video's own dimensions, like images (ebb does the
             // same) — the shader letterboxes within these bounds, so a matched
             // size means no black bars. The controls bar sits flush underneath.
@@ -671,7 +671,7 @@ impl Ribb {
                         .width(Length::Fixed(render_w))
                         .into()
                 }
-                _ => container(text("Loading video…").color(style::BLUE_500))
+                _ => container(text("Loading…").color(style::BLUE_500))
                     .height(Length::Fixed(render_h))
                     .center_x(Length::Fixed(render_w))
                     .center_y(Length::Fixed(render_h))
@@ -777,8 +777,7 @@ impl Ribb {
         ]
         .spacing(8)
         .align_y(Center);
-        // Copy-to-clipboard only makes sense for still images (we decode the
-        // file to RGBA); videos/SWF have no single image to hand over.
+        // Copy images as RGBA (the first frame for GIFs).
         if is_image(&post.file_url) {
             actions = actions.push(action_button_stateful(
                 self.actions
@@ -919,16 +918,15 @@ fn video_controls<'a>(post: &BooruPost, player: &Player, width: f32) -> El<'a> {
     })
     .width(Length::Fill);
 
-    container(
-        row![play, mute, seek]
-            .spacing(8)
-            .align_y(Center)
-            .width(Length::Fill),
-    )
-    .width(Length::Fixed(width))
-    .padding([4, 8])
-    .style(bg(style::GRAY_700))
-    .into()
+    let mut controls = row![play].spacing(8).align_y(Center).width(Length::Fill);
+    if !is_gif(&post.file_url) {
+        controls = controls.push(mute);
+    }
+    container(controls.push(seek))
+        .width(Length::Fixed(width))
+        .padding([4, 8])
+        .style(bg(style::GRAY_700))
+        .into()
 }
 
 fn detail_row(label: &str, value: El<'static>) -> El<'static> {
