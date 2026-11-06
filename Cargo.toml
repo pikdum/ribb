@@ -62,7 +62,7 @@ lucide-icons = { version = "1.17.0", features = ["iced"] }
 # the audio; bytemuck feeds the wgpu shader uniform; tempfile backs ffmpeg's
 # file input (we fetch bytes with our own client to satisfy CDN hotlink headers).
 ffmpeg-next = "8.1"
-cpal = "0.16"
+cpal = "0.18"
 bytemuck = "1"
 tempfile = "3"
 # Copy-to-clipboard for the actual image (paste into Discord etc.). iced's own
