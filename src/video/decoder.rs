@@ -93,8 +93,6 @@ struct AudioStream {
     index: usize,
     decoder: ffmpeg::decoder::Audio,
     resampler: Resampler,
-    out_channels: u16,
-    out_rate: u32,
 }
 
 struct DecodeControl<'a> {
@@ -129,11 +127,16 @@ impl Drop for AudioWorker {
     }
 }
 
-fn open_audio(ictx: &ffmpeg::format::context::Input, ring: &AudioRing) -> Option<AudioStream> {
-    let stream = ictx.streams().best(Type::Audio)?;
+fn open_audio(
+    ictx: &ffmpeg::format::context::Input,
+    ring: &AudioRing,
+) -> Result<Option<AudioStream>, ffmpeg::Error> {
+    let Some(stream) = ictx.streams().best(Type::Audio) else {
+        return Ok(None);
+    };
     let index = stream.index();
-    let ctx = ffmpeg::codec::context::Context::from_parameters(stream.parameters()).ok()?;
-    let decoder = ctx.decoder().audio().ok()?;
+    let ctx = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
+    let decoder = ctx.decoder().audio()?;
 
     let in_layout = {
         let l = decoder.channel_layout();
@@ -150,44 +153,57 @@ fn open_audio(ictx: &ffmpeg::format::context::Input, ring: &AudioRing) -> Option
         Sample::F32(SampleType::Packed),
         ChannelLayout::default(ring.channels as i32),
         ring.sample_rate,
-    )
-    .ok()?;
+    )?;
 
-    Some(AudioStream {
+    Ok(Some(AudioStream {
         index,
         decoder,
         resampler,
-        out_channels: ring.channels,
-        out_rate: ring.sample_rate,
-    })
+    }))
 }
 
-fn drain_audio(audio: &mut AudioStream, ring: &AudioRing, control: &DecodeControl<'_>) {
+fn resample_audio_frame(
+    resampler: &mut Resampler,
+    frame: &mut AudioFrame,
+) -> Result<AudioFrame, ffmpeg::Error> {
+    if frame.channel_layout().is_empty() {
+        frame.set_channel_layout(resampler.input().channel_layout);
+    }
+    let output = *resampler.output();
+    let cap =
+        (frame.samples() as i64 * output.rate as i64 / frame.rate().max(1) as i64) as usize + 1024;
+    let mut out = AudioFrame::new(output.format, cap, output.channel_layout);
+    resampler.run(frame, &mut out)?;
+    Ok(out)
+}
+
+fn drain_audio(
+    audio: &mut AudioStream,
+    ring: &AudioRing,
+    control: &DecodeControl<'_>,
+) -> Result<(), ffmpeg::Error> {
     let mut frame = AudioFrame::empty();
-    while audio.decoder.receive_frame(&mut frame).is_ok() {
+    loop {
+        match audio.decoder.receive_frame(&mut frame) {
+            Ok(()) => {}
+            Err(ffmpeg::Error::Eof)
+            | Err(ffmpeg::Error::Other {
+                errno: ffmpeg::error::EAGAIN,
+            }) => return Ok(()),
+            Err(error) => return Err(error),
+        }
         if control.interrupted() {
-            return;
+            return Ok(());
         }
-        let in_rate = frame.rate().max(1);
-        // Size the output generously so swresample doesn't buffer the excess
-        // internally (which would grow unbounded when upsampling, e.g. 44.1→48k).
-        let cap = (frame.samples() as i64 * audio.out_rate as i64 / in_rate as i64) as usize + 1024;
-        let mut out = AudioFrame::new(
-            Sample::F32(SampleType::Packed),
-            cap,
-            ChannelLayout::default(audio.out_channels as i32),
-        );
-        if audio.resampler.run(&frame, &mut out).is_err() {
-            continue;
-        }
-        let produced = out.samples() * audio.out_channels as usize;
+        let out = resample_audio_frame(&mut audio.resampler, &mut frame)?;
+        let produced = out.samples() * ring.channels as usize;
         let bytes = out.data(0);
         let floats = bytes.len() / 4;
         let raw: &[f32] = bytemuck::cast_slice(&bytes[..floats * 4]);
         let mut samples = &raw[..produced.min(raw.len())];
         while !samples.is_empty() {
             if control.interrupted() {
-                return;
+                return Ok(());
             }
             let written = ring.push(samples);
             samples = &samples[written..];
@@ -295,23 +311,37 @@ fn run(
         handle: None,
     };
     if let Some(ring) = audio_ring {
-        let audio_input = ffmpeg::format::input(&path)?;
-        if let Some(audio) = open_audio(&audio_input, &ring) {
-            let shared = Arc::clone(shared);
-            let stop = Arc::clone(&stop);
-            audio_worker.handle = Some(
-                thread::Builder::new()
-                    .name("ribb-audio".into())
-                    .spawn(move || {
-                        run_audio(audio_input, audio, &ring, &shared, &stop, duration_ms)
-                    })
-                    .expect("spawn audio decoder thread"),
-            );
+        let audio = ffmpeg::format::input(&path).and_then(|input| {
+            open_audio(&input, &ring).map(|audio| audio.map(|audio| (input, audio)))
+        });
+        match audio {
+            Ok(Some((input, audio))) => {
+                shared.has_audio.store(true, Ordering::Release);
+                let shared = Arc::clone(shared);
+                let stop = Arc::clone(&stop);
+                audio_worker.handle = Some(
+                    thread::Builder::new()
+                        .name("ribb-audio".into())
+                        .spawn(move || {
+                            if let Err(error) =
+                                run_audio(input, audio, &ring, &shared, &stop, duration_ms)
+                            {
+                                tracing::warn!(
+                                    "audio decode or resampling failed, using wall clock: {error}"
+                                );
+                                ring.clear();
+                                shared.has_audio.store(false, Ordering::Release);
+                            }
+                        })
+                        .expect("spawn audio decoder thread"),
+                );
+            }
+            Ok(None) => tracing::debug!("input has no audio stream"),
+            Err(error) => {
+                tracing::warn!("audio stream could not be opened, using wall clock: {error}");
+            }
         }
     }
-    shared
-        .has_audio
-        .store(audio_worker.handle.is_some(), Ordering::Release);
     shared.opened.store(true, Ordering::Release);
 
     // Accumulated pts offset for the current loop pass (see `drain_video`).
@@ -398,7 +428,7 @@ fn run_audio(
     shared: &Shared,
     stop: &AtomicBool,
     duration_ms: i64,
-) {
+) -> Result<(), ffmpeg::Error> {
     let mut control = DecodeControl {
         shared,
         stop,
@@ -406,15 +436,25 @@ fn run_audio(
     };
     loop {
         if control.stopped() {
-            return;
+            return Ok(());
         }
         let seek_gen = shared.seek_gen.load(Ordering::Acquire);
         if seek_gen != control.seek_gen {
             control.seek_gen = seek_gen;
             if duration_ms > 0 {
                 let target = shared.seek_target_ms.load(Ordering::Acquire).max(0);
-                let _ = input.seek((target % duration_ms) * 1000, ..);
+                input.seek((target % duration_ms) * 1000, ..)?;
                 audio.decoder.flush();
+                let source = *audio.resampler.input();
+                let output = *audio.resampler.output();
+                audio.resampler = Resampler::get(
+                    source.format,
+                    source.channel_layout,
+                    source.rate,
+                    output.format,
+                    output.channel_layout,
+                    output.rate,
+                )?;
                 ring.clear();
             }
             continue;
@@ -424,18 +464,18 @@ fn run_audio(
         match packet.read(&mut input) {
             Ok(()) => {
                 if packet.stream() == audio.index {
-                    let _ = audio.decoder.send_packet(&packet);
-                    drain_audio(&mut audio, ring, &control);
+                    audio.decoder.send_packet(&packet)?;
+                    drain_audio(&mut audio, ring, &control)?;
                 }
             }
-            Err(_) => {
-                let _ = audio.decoder.send_eof();
-                drain_audio(&mut audio, ring, &control);
+            Err(ffmpeg::Error::Eof) => {
+                audio.decoder.send_eof()?;
+                drain_audio(&mut audio, ring, &control)?;
                 if control.interrupted() {
                     continue;
                 }
                 if duration_ms > 0 {
-                    let _ = input.seek(0, ..);
+                    input.seek(0, ..)?;
                     audio.decoder.flush();
                 } else {
                     while !control.interrupted() {
@@ -443,6 +483,7 @@ fn run_audio(
                     }
                 }
             }
+            Err(error) => return Err(error),
         }
     }
 }
@@ -453,6 +494,48 @@ mod tests {
     use image::codecs::gif::{GifEncoder, Repeat};
     use image::{Delay, Frame, Rgba, RgbaImage};
     use std::time::Instant;
+
+    fn stereo_resampler() -> Resampler {
+        Resampler::get(
+            Sample::F32(SampleType::Packed),
+            ChannelLayout::STEREO,
+            48_000,
+            Sample::F32(SampleType::Packed),
+            ChannelLayout::STEREO,
+            48_000,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn audio_without_a_channel_layout_produces_samples() {
+        let mut resampler = stereo_resampler();
+        let mut frame = AudioFrame::new(Sample::F32(SampleType::Packed), 32, ChannelLayout::STEREO);
+        frame.set_rate(48_000);
+        let samples: &mut [f32] = bytemuck::cast_slice_mut(frame.data_mut(0));
+        samples.fill(0.25);
+        let mut layout = ChannelLayout::STEREO;
+        layout.0.order = ffmpeg::ffi::AVChannelOrder::AV_CHANNEL_ORDER_UNSPEC;
+        layout.0.u.mask = 0;
+        frame.set_channel_layout(layout);
+
+        let out = resample_audio_frame(&mut resampler, &mut frame)
+            .expect("unspecified decoded layout should use the stream layout");
+        assert_eq!(out.samples(), 32);
+        let samples: &[f32] = bytemuck::cast_slice(out.data(0));
+        assert_eq!(&samples[..64], &[0.25; 64]);
+    }
+
+    #[test]
+    fn incompatible_audio_layout_returns_a_conversion_error() {
+        let mut resampler = stereo_resampler();
+        let mut frame = AudioFrame::new(Sample::F32(SampleType::Packed), 32, ChannelLayout::MONO);
+        frame.set_rate(48_000);
+        assert!(matches!(
+            resample_audio_frame(&mut resampler, &mut frame),
+            Err(ffmpeg::Error::InputChanged)
+        ));
+    }
 
     struct GifDecoder {
         shared: Arc<Shared>,

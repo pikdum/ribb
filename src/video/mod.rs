@@ -109,9 +109,13 @@ impl Player {
         if !self.shared.opened.load(Ordering::Acquire) {
             return false;
         }
-        // Anchor the wall clock on the first post-open tick (audioless inputs).
-        if self.wall_anchor.is_none() && self.playing && !self.has_audio_clock() {
-            self.wall_anchor = Some(now);
+        if self.has_audio_clock() {
+            self.wall_anchor = None;
+        } else if self.wall_anchor.is_none() {
+            self.base_ms = self.last_position_ms;
+            if self.playing {
+                self.wall_anchor = Some(now);
+            }
         }
 
         let clock_ms = self.position_ms(now);
@@ -159,7 +163,7 @@ impl Player {
             Some(anchor) if self.playing => {
                 self.base_ms + now.saturating_duration_since(anchor).as_millis() as i64
             }
-            _ => self.base_ms,
+            _ => self.last_position_ms,
         }
     }
 
@@ -167,6 +171,7 @@ impl Player {
     /// freeze/resume the wall clock.
     pub fn toggle_playing(&mut self, now: Instant) {
         let pos = self.position_ms(now);
+        self.last_position_ms = pos;
         self.playing = !self.playing;
         if let Some(audio) = &self.audio {
             audio.set_playing(self.playing);
@@ -204,7 +209,11 @@ impl Player {
             self.frames_base = audio.frames_played();
             audio.clear();
         }
-        self.wall_anchor = if self.playing { Some(now) } else { None };
+        self.wall_anchor = if self.playing && !self.has_audio_clock() {
+            Some(now)
+        } else {
+            None
+        };
     }
 
     pub fn is_playing(&self) -> bool {
@@ -248,5 +257,66 @@ impl Drop for Player {
         // Signal the decoder thread to exit; it drops its `Shared` ref and the
         // temp file is removed once `_file` drops.
         self.shared.quit.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, AtomicI64};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    fn player_after_audio_failure(playing: bool) -> Player {
+        Player {
+            id: 0,
+            shared: Arc::new(Shared {
+                quit: AtomicBool::new(false),
+                opened: AtomicBool::new(true),
+                has_audio: AtomicBool::new(false),
+                eof: AtomicBool::new(false),
+                duration_ms: AtomicI64::new(2_000),
+                seek_gen: AtomicU64::new(0),
+                seek_target_ms: AtomicI64::new(0),
+                frames: Mutex::new(VecDeque::new()),
+            }),
+            _file: tempfile::NamedTempFile::new().unwrap().into_temp_path(),
+            audio: None,
+            current: Some(Arc::new(RgbaFrame {
+                width: 1,
+                height: 1,
+                data: vec![0; 4],
+                pts_ms: 1_350,
+            })),
+            version: 0,
+            playing,
+            muted: false,
+            base_ms: 0,
+            frames_base: 0,
+            wall_anchor: None,
+            last_position_ms: 1_350,
+        }
+    }
+
+    #[test]
+    fn failed_audio_clock_continues_from_the_last_presented_position() {
+        let mut player = player_after_audio_failure(true);
+        let now = Instant::now();
+        player.tick(now);
+        assert_eq!(player.position_ms_in_loop(), 1_350);
+        player.tick(now + Duration::from_millis(50));
+        assert_eq!(player.position_ms_in_loop(), 1_400);
+    }
+
+    #[test]
+    fn failed_audio_clock_stays_paused_at_the_last_presented_position() {
+        let mut player = player_after_audio_failure(false);
+        let now = Instant::now();
+        player.tick(now);
+        assert_eq!(player.position_ms_in_loop(), 1_350);
+        player.toggle_playing(now);
+        player.tick(now + Duration::from_millis(50));
+        assert_eq!(player.position_ms_in_loop(), 1_400);
     }
 }
