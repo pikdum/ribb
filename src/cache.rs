@@ -50,22 +50,33 @@ pub enum ImageKind {
     Full,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageLoadId(u64);
+
+#[derive(Debug)]
+struct ImageEntry {
+    state: ImageState,
+    load_id: ImageLoadId,
+    abort: Option<iced::task::Handle>,
+}
+
 /// URL-keyed cache of fetched images, split by [`ImageKind`].
 #[derive(Debug, Default)]
 pub struct ImageCache {
-    thumbnails: HashMap<String, ImageState>,
-    full: HashMap<String, ImageState>,
+    thumbnails: HashMap<String, ImageEntry>,
+    full: HashMap<String, ImageEntry>,
+    next_load_id: u64,
 }
 
 impl ImageCache {
-    fn map(&self, kind: ImageKind) -> &HashMap<String, ImageState> {
+    fn map(&self, kind: ImageKind) -> &HashMap<String, ImageEntry> {
         match kind {
             ImageKind::Thumbnail => &self.thumbnails,
             ImageKind::Full => &self.full,
         }
     }
 
-    fn map_mut(&mut self, kind: ImageKind) -> &mut HashMap<String, ImageState> {
+    fn map_mut(&mut self, kind: ImageKind) -> &mut HashMap<String, ImageEntry> {
         match kind {
             ImageKind::Thumbnail => &mut self.thumbnails,
             ImageKind::Full => &mut self.full,
@@ -73,27 +84,71 @@ impl ImageCache {
     }
 
     pub fn get(&self, url: &str, kind: ImageKind) -> Option<&ImageState> {
-        self.map(kind).get(url)
+        self.map(kind).get(url).map(|entry| &entry.state)
     }
 
-    /// Mark a URL as in-flight for `kind`. Returns `true` if newly inserted
-    /// (the caller should kick off a fetch), `false` if already known.
-    pub fn begin_load(&mut self, url: &str, kind: ImageKind) -> bool {
-        let map = self.map_mut(kind);
-        if map.contains_key(url) {
-            return false;
+    /// Mark a URL as in-flight, returning a fresh identity for a new fetch.
+    pub fn begin_load(&mut self, url: &str, kind: ImageKind) -> Option<ImageLoadId> {
+        if self.map(kind).contains_key(url) {
+            return None;
         }
-        map.insert(url.to_string(), ImageState::Loading);
-        true
+        let load_id = ImageLoadId(self.next_load_id);
+        self.next_load_id = self
+            .next_load_id
+            .checked_add(1)
+            .expect("image load ID exhausted");
+        self.map_mut(kind).insert(
+            url.to_string(),
+            ImageEntry {
+                state: ImageState::Loading,
+                load_id,
+                abort: None,
+            },
+        );
+        Some(load_id)
+    }
+
+    pub fn track_load(
+        &mut self,
+        url: &str,
+        kind: ImageKind,
+        load_id: ImageLoadId,
+        abort: iced::task::Handle,
+    ) {
+        let abort = abort.abort_on_drop();
+        if let Some(entry) = self.map_mut(kind).get_mut(url) {
+            if entry.load_id == load_id && matches!(entry.state, ImageState::Loading) {
+                entry.abort = Some(abort);
+            }
+        }
+    }
+
+    /// Drop images and pending requests no open tab owns.
+    pub fn retain(&mut self, mut keep: impl FnMut(&str, ImageKind) -> bool) {
+        self.thumbnails
+            .retain(|url, _| keep(url, ImageKind::Thumbnail));
+        self.full.retain(|url, _| keep(url, ImageKind::Full));
     }
 
     /// Record the result of a fetch+decode. `None` marks failure.
-    pub fn finish_load(&mut self, url: String, kind: ImageKind, decoded: Option<DecodedImage>) {
-        let state = match decoded {
+    pub fn finish_load(
+        &mut self,
+        url: &str,
+        kind: ImageKind,
+        load_id: ImageLoadId,
+        decoded: Option<DecodedImage>,
+    ) {
+        let Some(entry) = self.map_mut(kind).get_mut(url) else {
+            return;
+        };
+        if entry.load_id != load_id || !matches!(entry.state, ImageState::Loading) {
+            return;
+        }
+        entry.state = match decoded {
             Some(img) => ImageState::Loaded(Handle::from_rgba(img.width, img.height, img.rgba)),
             None => ImageState::Failed,
         };
-        self.map_mut(kind).insert(url, state);
+        entry.abort = None;
     }
 }
 
@@ -108,7 +163,9 @@ pub async fn fetch_image(
     max_dim: Option<u32>,
     high_quality: bool,
 ) -> (String, Option<DecodedImage>) {
-    let _permit = sem.acquire().await;
+    let Ok(permit) = sem.acquire_owned().await else {
+        return (url, None);
+    };
 
     let t0 = Instant::now();
     let bytes = match async {
@@ -135,10 +192,12 @@ pub async fn fetch_image(
     let fetch_ms = t0.elapsed().as_millis();
 
     let t1 = Instant::now();
-    let decoded =
-        tokio::task::spawn_blocking(move || decode_and_resize(&bytes, max_dim, high_quality))
-            .await
-            .unwrap_or(None);
+    let decoded = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        decode_and_resize(&bytes, max_dim, high_quality)
+    })
+    .await
+    .unwrap_or(None);
     let decode_ms = t1.elapsed().as_millis();
 
     match &decoded {
@@ -198,10 +257,106 @@ fn decode_and_resize(
         }
         _ => img,
     };
-    let rgba = img.to_rgba8();
+    let rgba = img.into_rgba8();
     Some(DecodedImage {
         width: rgba.width(),
         height: rgba.height(),
         rgba: rgba.into_raw(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decoded() -> DecodedImage {
+        DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![255; 4],
+        }
+    }
+
+    #[test]
+    fn stale_completion_cannot_recreate_evicted_image() {
+        let mut cache = ImageCache::default();
+        let load = cache.begin_load("image", ImageKind::Full).unwrap();
+        cache.retain(|_, _| false);
+        cache.finish_load("image", ImageKind::Full, load, Some(decoded()));
+        assert!(cache.get("image", ImageKind::Full).is_none());
+    }
+
+    #[test]
+    fn stale_completion_cannot_replace_new_request_for_same_url() {
+        let mut cache = ImageCache::default();
+        let old = cache.begin_load("image", ImageKind::Full).unwrap();
+        cache.retain(|_, _| false);
+        let new = cache.begin_load("image", ImageKind::Full).unwrap();
+        assert_ne!(old, new);
+
+        cache.finish_load("image", ImageKind::Full, old, None);
+        assert!(matches!(
+            cache.get("image", ImageKind::Full),
+            Some(ImageState::Loading)
+        ));
+        cache.finish_load("image", ImageKind::Full, new, Some(decoded()));
+        assert!(matches!(
+            cache.get("image", ImageKind::Full),
+            Some(ImageState::Loaded(_))
+        ));
+        cache.finish_load("image", ImageKind::Full, old, None);
+        assert!(matches!(
+            cache.get("image", ImageKind::Full),
+            Some(ImageState::Loaded(_))
+        ));
+    }
+
+    #[test]
+    fn thumbnail_and_full_requests_stay_distinct_for_same_url() {
+        let mut cache = ImageCache::default();
+        let thumb = cache.begin_load("image", ImageKind::Thumbnail).unwrap();
+        let full = cache.begin_load("image", ImageKind::Full).unwrap();
+        cache.finish_load("image", ImageKind::Thumbnail, full, None);
+        assert!(matches!(
+            cache.get("image", ImageKind::Thumbnail),
+            Some(ImageState::Loading)
+        ));
+        cache.finish_load("image", ImageKind::Thumbnail, thumb, Some(decoded()));
+        cache.finish_load("image", ImageKind::Full, full, None);
+        assert!(matches!(
+            cache.get("image", ImageKind::Thumbnail),
+            Some(ImageState::Loaded(_))
+        ));
+        assert!(matches!(
+            cache.get("image", ImageKind::Full),
+            Some(ImageState::Failed)
+        ));
+
+        cache.retain(|_, kind| kind == ImageKind::Thumbnail);
+        assert!(matches!(
+            cache.get("image", ImageKind::Thumbnail),
+            Some(ImageState::Loaded(_))
+        ));
+        assert!(cache.get("image", ImageKind::Full).is_none());
+    }
+
+    #[test]
+    fn pruning_aborts_only_unowned_requests() {
+        let mut cache = ImageCache::default();
+        let kept = cache.begin_load("kept", ImageKind::Thumbnail).unwrap();
+        let dropped = cache.begin_load("dropped", ImageKind::Thumbnail).unwrap();
+        let (_kept_task, kept_abort) = iced::Task::done(()).abortable();
+        let (_dropped_task, dropped_abort) = iced::Task::done(()).abortable();
+        cache.track_load("kept", ImageKind::Thumbnail, kept, kept_abort.clone());
+        cache.track_load(
+            "dropped",
+            ImageKind::Thumbnail,
+            dropped,
+            dropped_abort.clone(),
+        );
+
+        cache.retain(|url, _| url == "kept");
+        assert!(!kept_abort.is_aborted());
+        assert!(dropped_abort.is_aborted());
+    }
 }

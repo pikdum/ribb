@@ -5,7 +5,7 @@
 //! `useEffect`-driven fetches become explicit [`Task`]s returned from `update`.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -27,7 +27,9 @@ use crate::booru::{
     is_gif, is_image, is_swf, is_video, BooruClient, BooruPost, BooruTag, PostQuery, PostsPage,
     Rating, Site, TagGroup,
 };
-use crate::cache::{fetch_bytes, fetch_image, DecodedImage, ImageCache, ImageKind, ImageState};
+use crate::cache::{
+    fetch_bytes, fetch_image, DecodedImage, ImageCache, ImageKind, ImageLoadId, ImageState,
+};
 use crate::settings::Settings;
 use crate::style;
 use crate::video::Player;
@@ -259,7 +261,7 @@ pub enum Message {
     },
     OpenExternal(String),
     // Images / SWF
-    ImageLoaded(String, ImageKind, Option<DecodedImage>),
+    ImageLoaded(String, ImageKind, ImageLoadId, Option<DecodedImage>),
     SwfLoaded {
         tab: u64,
         post_id: String,
@@ -553,6 +555,7 @@ impl Ribb {
                     } else if idx < self.active || (idx == self.active && idx > 0) {
                         self.active = self.active.saturating_sub(1);
                     }
+                    self.prune_images();
                     return self.defer_active_restore();
                 }
                 Task::none()
@@ -825,8 +828,8 @@ impl Ribb {
             }
 
             // --- Images / SWF ------------------------------------------
-            Message::ImageLoaded(url, kind, decoded) => {
-                self.images.finish_load(url, kind, decoded);
+            Message::ImageLoaded(url, kind, load_id, decoded) => {
+                self.images.finish_load(&url, kind, load_id, decoded);
                 Task::none()
             }
             Message::SwfLoaded {
@@ -1008,6 +1011,7 @@ impl Ribb {
                 };
                 // Kick off thumbnail loads for the new posts.
                 let urls: Vec<String> = tab.posts.iter().filter_map(preview_url).collect();
+                self.prune_images();
                 let mut task = self.load_images(urls, Some(THUMB_MAX), ImageKind::Thumbnail);
 
                 // Debug: auto-focus a post (prefer an SWF) to exercise the
@@ -1052,6 +1056,7 @@ impl Ribb {
                     tab.has_next_page = false;
                     tab.loading = false;
                     tab.error = Some(msg);
+                    self.prune_images();
                     Task::none()
                 }
             }
@@ -1060,6 +1065,28 @@ impl Ribb {
 
     fn scroll_active_to_top(&self) -> Task<Message> {
         self.scroll_tab_to(self.active, 0.0)
+    }
+
+    fn prune_images(&mut self) {
+        let thumbnails: HashSet<String> = self
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.posts.iter().filter_map(preview_url))
+            .collect();
+        let full: HashSet<&str> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| {
+                let focused = tab.focused.as_deref()?;
+                tab.posts.iter().find(|post| post.id == focused)
+            })
+            .filter(|post| is_image(&post.file_url) && !is_gif(&post.file_url))
+            .map(|post| post.file_url.as_str())
+            .collect();
+        self.images.retain(|url, kind| match kind {
+            ImageKind::Thumbnail => thumbnails.contains(url),
+            ImageKind::Full => full.contains(url),
+        });
     }
 
     fn defer_active_restore(&mut self) -> Task<Message> {
@@ -1092,6 +1119,7 @@ impl Ribb {
                 tab.video.remove(&post_id);
                 tab.scroll_y = tab.grid_scroll_y;
             }
+            self.prune_images();
             return self.defer_active_restore();
         }
         let entering_from_grid = self.tabs[idx].focused.is_none();
@@ -1114,6 +1142,7 @@ impl Ribb {
             tab.focused = Some(post_id.clone());
             tab.scroll_y = 0.0;
         }
+        self.prune_images();
 
         let tab_id = self.tabs[idx].id;
         let mut tasks = Vec::new();
@@ -1201,13 +1230,17 @@ impl Ribb {
         let high_quality = matches!(kind, ImageKind::Full);
         let mut tasks = Vec::new();
         for url in urls {
-            if self.images.begin_load(&url, kind) {
+            if let Some(load_id) = self.images.begin_load(&url, kind) {
                 let http = self.client.http().clone();
                 let sem = self.image_sem.clone();
-                tasks.push(Task::perform(
-                    async move { fetch_image(http, sem, url, max_dim, high_quality).await },
-                    move |(url, decoded)| Message::ImageLoaded(url, kind, decoded),
-                ));
+                let task_url = url.clone();
+                let (task, abort) = Task::perform(
+                    async move { fetch_image(http, sem, task_url, max_dim, high_quality).await },
+                    move |(url, decoded)| Message::ImageLoaded(url, kind, load_id, decoded),
+                )
+                .abortable();
+                self.images.track_load(&url, kind, load_id, abort);
+                tasks.push(task);
             }
         }
         Task::batch(tasks)
@@ -1412,6 +1445,122 @@ include!("view.rs");
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn image_post(id: &str, url: &str, preview: &str) -> BooruPost {
+        BooruPost {
+            id: id.into(),
+            post_view: String::new(),
+            tags: vec![],
+            tag_groups: vec![],
+            file_url: url.into(),
+            preview_url: preview.into(),
+            sample_url: None,
+            width: 100,
+            height: 100,
+            rating: "general".into(),
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn image_cache_back_releases_full_image_and_preserves_grid_thumbnail() {
+        let mut app = Ribb::new();
+        let url = "https://x/shared.png";
+        app.tabs[0].posts.push(image_post("1", url, url));
+        let _ = app.load_images(vec![url.into()], Some(THUMB_MAX), ImageKind::Thumbnail);
+        let _ = app.update(Message::TogglePost("1".into()));
+        assert!(app.images.get(url, ImageKind::Full).is_some());
+
+        let _ = app.update(Message::TogglePost("1".into()));
+        assert!(app.images.get(url, ImageKind::Full).is_none());
+        assert!(app.images.get(url, ImageKind::Thumbnail).is_some());
+    }
+
+    #[test]
+    fn image_cache_shared_urls_survive_until_last_owner_tab_closes() {
+        let mut app = Ribb::new();
+        let url = "https://x/shared.png";
+        app.tabs[0].posts.push(image_post("1", url, url));
+        let _ = app.load_images(vec![url.into()], Some(THUMB_MAX), ImageKind::Thumbnail);
+        let _ = app.update(Message::TogglePost("1".into()));
+        let first_id = app.tabs[0].id;
+        let mut second = Tab::new(2, None);
+        second.posts.push(image_post("2", url, url));
+        second.focused = Some("2".into());
+        app.tabs.push(second);
+        app.tabs.push(Tab::new(3, None));
+
+        let _ = app.update(Message::CloseTab(first_id));
+        assert!(app.images.get(url, ImageKind::Thumbnail).is_some());
+        assert!(app.images.get(url, ImageKind::Full).is_some());
+        let _ = app.update(Message::CloseTab(2));
+        assert!(app.images.get(url, ImageKind::Thumbnail).is_none());
+        assert!(app.images.get(url, ImageKind::Full).is_none());
+    }
+
+    #[test]
+    fn image_cache_focus_change_releases_previous_full_image() {
+        let mut app = Ribb::new();
+        let first = "https://x/first.png";
+        let second = "https://x/second.png";
+        app.tabs[0].posts = vec![
+            image_post("1", first, first),
+            image_post("2", second, second),
+        ];
+        let _ = app.update(Message::TogglePost("1".into()));
+        let _ = app.update(Message::TogglePost("2".into()));
+        assert!(app.images.get(first, ImageKind::Full).is_none());
+        assert!(app.images.get(second, ImageKind::Full).is_some());
+    }
+
+    #[test]
+    fn image_cache_new_page_releases_old_images_and_keeps_other_tabs() {
+        let mut app = Ribb::new();
+        let old = "https://x/old.png";
+        let shared = "https://x/shared.png";
+        let new = "https://x/new.png";
+        app.tabs[0].posts = vec![image_post("1", old, old), image_post("2", shared, shared)];
+        let _ = app.load_images(
+            vec![old.into(), shared.into()],
+            Some(THUMB_MAX),
+            ImageKind::Thumbnail,
+        );
+        let _ = app.update(Message::TogglePost("1".into()));
+        let mut other = Tab::new(2, None);
+        other.posts.push(image_post("2", shared, shared));
+        app.tabs.push(other);
+
+        let _ = app.update(Message::PostsLoaded {
+            tab: app.tabs[0].id,
+            generation: app.tabs[0].generation,
+            attempt: 0,
+            result: Ok(PostsPage {
+                posts: vec![image_post("3", new, new)],
+                has_next_page: false,
+            }),
+        });
+        assert!(app.images.get(old, ImageKind::Thumbnail).is_none());
+        assert!(app.images.get(old, ImageKind::Full).is_none());
+        assert!(app.images.get(shared, ImageKind::Thumbnail).is_some());
+        assert!(app.images.get(new, ImageKind::Thumbnail).is_some());
+    }
+
+    #[test]
+    fn image_cache_failed_search_releases_old_images() {
+        let mut app = Ribb::new();
+        let url = "https://x/old.png";
+        app.tabs[0].posts.push(image_post("1", url, url));
+        let _ = app.load_images(vec![url.into()], Some(THUMB_MAX), ImageKind::Thumbnail);
+        let _ = app.update(Message::TogglePost("1".into()));
+        let _ = app.update(Message::PostsLoaded {
+            tab: app.tabs[0].id,
+            generation: app.tabs[0].generation,
+            attempt: MAX_FETCH_ATTEMPTS - 1,
+            result: Err("failed".into()),
+        });
+        assert!(app.images.get(url, ImageKind::Thumbnail).is_none());
+        assert!(app.images.get(url, ImageKind::Full).is_none());
+    }
 
     #[test]
     fn last_word_extracts_active_word() {
