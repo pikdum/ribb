@@ -73,6 +73,7 @@ pub struct Ribb {
     images: ImageCache,
     /// Caps concurrent image fetch/decode jobs (shared by all fetch Tasks).
     image_sem: Arc<tokio::sync::Semaphore>,
+    copy_sem: Arc<tokio::sync::Semaphore>,
     /// Tab whose saved scroll offset is about to be restored after activation.
     pending_scroll_restore: Option<u64>,
     /// Latest keyboard modifier state; used for Ctrl+click tag behavior.
@@ -222,18 +223,21 @@ impl Tab {
 /// `Message`, so it has a compact `Debug` that prints the byte count rather
 /// than the whole pixel buffer.
 #[derive(Clone)]
-pub struct ClipboardImage {
+pub struct ClipboardImage(Arc<PreparedClipboardImage>);
+
+struct PreparedClipboardImage {
     width: usize,
     height: usize,
     rgba: Vec<u8>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl std::fmt::Debug for ClipboardImage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClipboardImage")
-            .field("width", &self.width)
-            .field("height", &self.height)
-            .field("bytes", &self.rgba.len())
+            .field("width", &self.0.width)
+            .field("height", &self.0.height)
+            .field("bytes", &self.0.rgba.len())
             .finish()
     }
 }
@@ -375,6 +379,7 @@ impl Ribb {
             next_tab_id: 1,
             images: ImageCache::default(),
             image_sem: Arc::new(tokio::sync::Semaphore::new(IMAGE_CONCURRENCY)),
+            copy_sem: Arc::new(tokio::sync::Semaphore::new(1)),
             pending_scroll_restore: None,
             modifiers: iced::keyboard::Modifiers::default(),
             viewport: Cell::new(Size::new(1100.0, 700.0)),
@@ -450,11 +455,11 @@ impl Ribb {
                 }
             },
         };
-        let (width, height) = (image.width, image.height);
+        let (width, height) = (image.0.width, image.0.height);
         let data = arboard::ImageData {
             width,
             height,
-            bytes: image.rgba.into(),
+            bytes: image.0.rgba.as_slice().into(),
         };
         match clipboard.set_image(data) {
             Ok(()) => {
@@ -825,8 +830,9 @@ impl Ribb {
                     ActionStatus::InProgress,
                 );
                 let client = self.client.http().clone();
+                let sem = self.copy_sem.clone();
                 Task::perform(
-                    async move { fetch_image_rgba(client, url).await },
+                    async move { fetch_image_rgba(client, url, sem).await },
                     move |result| Message::ImageCopyReady {
                         post_id: post_id.clone(),
                         result,
@@ -1418,18 +1424,24 @@ fn clear_action_later(post_id: String, kind: ActionKind) -> Task<Message> {
 /// Fetch a post's image and decode it to full-resolution RGBA8 for the
 /// clipboard. Like the grid path, decode runs on a blocking thread (CPU-bound);
 /// unlike it, there's no downscale — clipboard paste wants the real pixels.
-async fn fetch_image_rgba(client: reqwest::Client, url: String) -> Result<ClipboardImage, String> {
+async fn fetch_image_rgba(
+    client: reqwest::Client,
+    url: String,
+    sem: Arc<tokio::sync::Semaphore>,
+) -> Result<ClipboardImage, String> {
+    let permit = sem.acquire_owned().await.map_err(|e| e.to_string())?;
     let (_url, bytes) = fetch_bytes(client, url).await;
     let bytes = bytes.ok_or_else(|| "failed to fetch image".to_string())?;
     tokio::task::spawn_blocking(move || {
         let rgba = ::image::load_from_memory(&bytes)
             .map_err(|e| e.to_string())?
-            .to_rgba8();
-        Ok(ClipboardImage {
+            .into_rgba8();
+        Ok(ClipboardImage(Arc::new(PreparedClipboardImage {
             width: rgba.width() as usize,
             height: rgba.height() as usize,
             rgba: rgba.into_raw(),
-        })
+            _permit: permit,
+        })))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1490,6 +1502,100 @@ include!("view.rs");
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_copy_waits_until_prepared_message_clones_are_dropped() {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(verify_clipboard_copy_admission());
+    }
+
+    async fn verify_clipboard_copy_admission() {
+        use std::io::{Read, Write};
+
+        let pixels = vec![12, 34, 56, 78, 90, 123, 145, 167];
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        ::image::RgbaImage::from_raw(2, 1, pixels.clone())
+            .unwrap()
+            .write_to(&mut encoded, ::image::ImageFormat::Png)
+            .unwrap();
+        let encoded = encoded.into_inner();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/image.png", listener.local_addr().unwrap());
+        let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let server = std::thread::spawn(move || {
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                requests.send(index).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    encoded.len()
+                )
+                .unwrap();
+                stream.write_all(&encoded).unwrap();
+            }
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let sem = Arc::new(tokio::sync::Semaphore::new(1));
+        let first = tokio::time::timeout(
+            Duration::from_secs(5),
+            fetch_image_rgba(client.clone(), url.clone(), sem.clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(received.recv().await, Some(0));
+        assert_eq!((first.0.width, first.0.height), (2, 1));
+        assert_eq!(first.0.rgba, pixels);
+
+        let message = Message::ImageCopyReady {
+            post_id: "1".into(),
+            result: Ok(first),
+        };
+        let cloned = message.clone();
+        let second = tokio::spawn(fetch_image_rgba(client, url, sem));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), received.recv())
+                .await
+                .is_err(),
+            "another image was fetched while a prepared copy was retained"
+        );
+        drop(message);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), received.recv())
+                .await
+                .is_err(),
+            "another image was fetched while a prepared message clone was retained"
+        );
+        drop(cloned);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), received.recv())
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        let second = tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!((second.0.width, second.0.height), (2, 1));
+        assert_eq!(second.0.rgba, pixels);
+        server.join().unwrap();
+    }
 
     fn deferred_video(app: &Ribb, idx: usize) -> Message {
         Message::VideoLoaded {
