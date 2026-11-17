@@ -120,6 +120,8 @@ struct Tab {
     has_next_page: bool,
     /// Post currently replacing the grid in focus mode.
     focused: Option<String>,
+    focus_generation: u64,
+    pending_media: Option<PendingMedia>,
     loading: bool,
     error: Option<String>,
     /// Live tag suggestions for the last word being typed.
@@ -141,7 +143,44 @@ struct Tab {
     grid_scroll_y: f32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaRequest {
+    tab: u64,
+    generation: u64,
+    focus_generation: u64,
+    post_id: String,
+}
+
+struct PendingMedia {
+    request: MediaRequest,
+    _abort: iced::task::Handle,
+}
+
 impl Tab {
+    fn set_focus(&mut self, focused: Option<String>) {
+        self.pending_media = None;
+        self.video.clear();
+        self.swf.clear();
+        self.focus_generation += 1;
+        self.focused = focused;
+    }
+
+    fn finish_media_request(&mut self, request: &MediaRequest) -> bool {
+        let current = request.tab == self.id
+            && request.generation == self.generation
+            && request.focus_generation == self.focus_generation
+            && self.focused.as_deref() == Some(request.post_id.as_str())
+            && self.posts.iter().any(|post| post.id == request.post_id)
+            && self
+                .pending_media
+                .as_ref()
+                .is_some_and(|pending| pending.request == *request);
+        if current {
+            self.pending_media = None;
+        }
+        current
+    }
+
     fn new(id: u64, query: Option<String>) -> Self {
         let title = match &query {
             Some(q) if !q.is_empty() => q.clone(),
@@ -159,6 +198,8 @@ impl Tab {
             posts: Vec::new(),
             has_next_page: false,
             focused: None,
+            focus_generation: 0,
+            pending_media: None,
             loading: false,
             error: None,
             autocomplete: Vec::new(),
@@ -263,13 +304,11 @@ pub enum Message {
     // Images / SWF
     ImageLoaded(String, ImageKind, ImageLoadId, Option<DecodedImage>),
     SwfLoaded {
-        tab: u64,
-        post_id: String,
+        request: MediaRequest,
         bytes: Option<Vec<u8>>,
     },
     VideoLoaded {
-        tab: u64,
-        post_id: String,
+        request: MediaRequest,
         bytes: Option<Vec<u8>>,
     },
     /// Per-frame tick (from `window::frames`) to advance video playback.
@@ -832,36 +871,38 @@ impl Ribb {
                 self.images.finish_load(&url, kind, load_id, decoded);
                 Task::none()
             }
-            Message::SwfLoaded {
-                tab,
-                post_id,
-                bytes,
-            } => {
+            Message::SwfLoaded { request, bytes } => {
+                let Some(idx) = self.tab_index(request.tab) else {
+                    return Task::none();
+                };
+                if !self.tabs[idx].finish_media_request(&request) {
+                    return Task::none();
+                }
+                let post_id = request.post_id;
                 if let Some(bytes) = bytes {
                     match RufflePlayer::from_bytes(&post_id, &bytes) {
                         Ok(player) => {
                             tracing::info!(post = %post_id, size = ?player.size(), "SWF player ready");
-                            if let Some(idx) = self.tab_index(tab) {
-                                self.tabs[idx].swf.insert(post_id, player);
-                            }
+                            self.tabs[idx].swf.insert(post_id, player);
                         }
                         Err(e) => tracing::warn!("failed to load SWF {post_id}: {e}"),
                     }
                 }
                 Task::none()
             }
-            Message::VideoLoaded {
-                tab,
-                post_id,
-                bytes,
-            } => {
+            Message::VideoLoaded { request, bytes } => {
+                let Some(idx) = self.tab_index(request.tab) else {
+                    return Task::none();
+                };
+                if !self.tabs[idx].finish_media_request(&request) {
+                    return Task::none();
+                }
+                let post_id = request.post_id;
                 if let Some(bytes) = bytes {
                     match Player::from_bytes(&bytes) {
                         Ok(player) => {
                             tracing::info!(post = %post_id, "video player ready");
-                            if let Some(idx) = self.tab_index(tab) {
-                                self.tabs[idx].video.insert(post_id, player);
-                            }
+                            self.tabs[idx].video.insert(post_id, player);
                         }
                         Err(e) => tracing::warn!("failed to start video {post_id}: {e}"),
                     }
@@ -953,6 +994,7 @@ impl Ribb {
         if tab.query.is_none() {
             return Task::none();
         }
+        tab.set_focus(None);
         tab.generation += 1;
         tab.loading = true;
         tracing::info!(
@@ -962,7 +1004,7 @@ impl Ribb {
             query = ?tab.query,
             "fetching posts"
         );
-        build_fetch_task(
+        let task = build_fetch_task(
             self.client.clone(),
             tab.id,
             tab.generation,
@@ -971,7 +1013,9 @@ impl Ribb {
             tab.page,
             tab.rating,
             0,
-        )
+        );
+        self.prune_images();
+        task
     }
 
     fn handle_posts_loaded(
@@ -1000,9 +1044,7 @@ impl Ribb {
                 let tab = &mut self.tabs[idx];
                 tab.posts = page.posts;
                 tab.has_next_page = page.has_next_page;
-                tab.focused = None;
-                tab.swf.clear();
-                tab.video.clear();
+                tab.set_focus(None);
                 tab.loading = false;
                 tab.error = if tab.posts.is_empty() {
                     Some("No results found.".to_string())
@@ -1050,9 +1092,7 @@ impl Ribb {
                     tracing::error!(tab = tab_id, "fetch failed: {msg}");
                     let tab = &mut self.tabs[idx];
                     tab.posts.clear();
-                    tab.focused = None;
-                    tab.swf.clear();
-                    tab.video.clear();
+                    tab.set_focus(None);
                     tab.has_next_page = false;
                     tab.loading = false;
                     tab.error = Some(msg);
@@ -1114,9 +1154,7 @@ impl Ribb {
         if self.tabs[idx].focused.as_deref() == Some(post_id.as_str()) {
             {
                 let tab = &mut self.tabs[idx];
-                tab.focused = None;
-                tab.swf.remove(&post_id);
-                tab.video.remove(&post_id);
+                tab.set_focus(None);
                 tab.scroll_y = tab.grid_scroll_y;
             }
             self.prune_images();
@@ -1139,7 +1177,7 @@ impl Ribb {
             if entering_from_grid {
                 tab.grid_scroll_y = tab.scroll_y;
             }
-            tab.focused = Some(post_id.clone());
+            tab.set_focus(Some(post_id.clone()));
             tab.scroll_y = 0.0;
         }
         self.prune_images();
@@ -1172,32 +1210,39 @@ impl Ribb {
                 post.file_url
             );
             tasks.push(self.load_images(vec![post.file_url.clone()], Some(cap), ImageKind::Full));
-        } else if is_swf(&post.file_url) && !self.tabs[idx].swf.contains_key(&post_id) {
+        } else if is_swf(&post.file_url) || is_video(&post.file_url) || is_gif(&post.file_url) {
+            let request = MediaRequest {
+                tab: tab_id,
+                generation: self.tabs[idx].generation,
+                focus_generation: self.tabs[idx].focus_generation,
+                post_id,
+            };
+            let response_request = request.clone();
+            let swf = is_swf(&post.file_url);
             let http = self.client.http().clone();
             let url = post.file_url.clone();
-            tasks.push(Task::perform(
+            let (task, abort) = Task::perform(
                 async move { fetch_bytes(http, url).await },
-                move |(_url, bytes)| Message::SwfLoaded {
-                    tab: tab_id,
-                    post_id: post_id.clone(),
-                    bytes,
+                move |(_url, bytes)| {
+                    if swf {
+                        Message::SwfLoaded {
+                            request: response_request.clone(),
+                            bytes,
+                        }
+                    } else {
+                        Message::VideoLoaded {
+                            request: response_request.clone(),
+                            bytes,
+                        }
+                    }
                 },
-            ));
-        } else if (is_video(&post.file_url) || is_gif(&post.file_url))
-            && !self.tabs[idx].video.contains_key(&post_id)
-        {
-            // Fetch with our own client (booru CDNs reject ffmpeg's default HTTP
-            // headers; Gelbooru needs a Referer), then decode from a temp file.
-            let http = self.client.http().clone();
-            let url = post.file_url.clone();
-            tasks.push(Task::perform(
-                async move { fetch_bytes(http, url).await },
-                move |(_url, bytes)| Message::VideoLoaded {
-                    tab: tab_id,
-                    post_id: post_id.clone(),
-                    bytes,
-                },
-            ));
+            )
+            .abortable();
+            self.tabs[idx].pending_media = Some(PendingMedia {
+                request,
+                _abort: abort.abort_on_drop(),
+            });
+            tasks.push(task);
         }
 
         tasks.push(self.defer_active_restore());
@@ -1445,6 +1490,222 @@ include!("view.rs");
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn deferred_video(app: &Ribb, idx: usize) -> Message {
+        Message::VideoLoaded {
+            request: app.tabs[idx]
+                .pending_media
+                .as_ref()
+                .unwrap()
+                .request
+                .clone(),
+            bytes: Some(tiny_gif()),
+        }
+    }
+
+    fn media_post(id: &str) -> BooruPost {
+        image_post(id, &format!("https://x/{id}.gif"), "")
+    }
+
+    fn tiny_gif() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        ::image::codecs::gif::GifEncoder::new(&mut bytes)
+            .encode_frame(::image::Frame::new(::image::RgbaImage::from_pixel(
+                1,
+                1,
+                ::image::Rgba([255, 0, 0, 255]),
+            )))
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn media_request_back_rejects_delayed_video() {
+        let mut app = Ribb::new();
+        app.tabs[0].posts.push(media_post("1"));
+        let _ = app.update(Message::TogglePost("1".into()));
+        let delayed = deferred_video(&app, 0);
+
+        let _ = app.update(Message::TogglePost("1".into()));
+        let _ = app.update(delayed);
+        assert!(app.tabs[0].video.is_empty());
+        assert!(app.tabs[0].swf.is_empty());
+        assert!(app.tabs[0].focused.is_none());
+    }
+
+    #[test]
+    fn media_request_page_replacement_rejects_delayed_video() {
+        let mut app = Ribb::new();
+        app.tabs[0].posts.push(media_post("1"));
+        let _ = app.update(Message::TogglePost("1".into()));
+        let delayed = deferred_video(&app, 0);
+
+        let _ = app.update(Message::PostsLoaded {
+            tab: app.tabs[0].id,
+            generation: app.tabs[0].generation,
+            attempt: 0,
+            result: Ok(PostsPage {
+                posts: vec![media_post("2")],
+                has_next_page: false,
+            }),
+        });
+        let _ = app.update(delayed);
+        assert!(app.tabs[0].video.is_empty());
+        assert!(app.tabs[0].swf.is_empty());
+    }
+
+    #[test]
+    fn media_request_new_search_rejects_video_before_results_arrive() {
+        let mut app = Ribb::new();
+        app.tabs[0].posts.push(media_post("1"));
+        let _ = app.update(Message::TogglePost("1".into()));
+        let delayed = deferred_video(&app, 0);
+
+        let _ = app.update(Message::SubmitSearch);
+        assert!(app.tabs[0].loading);
+        let _ = app.update(delayed);
+        assert!(app.tabs[0].video.is_empty());
+        assert!(app.tabs[0].swf.is_empty());
+    }
+
+    #[test]
+    fn media_request_back_and_reopen_rejects_previous_focus_lifetime() {
+        let mut app = Ribb::new();
+        app.tabs[0].posts.push(media_post("1"));
+        let _ = app.update(Message::TogglePost("1".into()));
+        let delayed = deferred_video(&app, 0);
+        let _ = app.update(Message::TogglePost("1".into()));
+        let _ = app.update(Message::TogglePost("1".into()));
+        let current = deferred_video(&app, 0);
+
+        let _ = app.update(delayed);
+        assert!(app.tabs[0].video.is_empty());
+        let _ = app.update(current);
+        assert!(app.tabs[0].video.contains_key("1"));
+    }
+
+    #[test]
+    fn media_request_direct_focus_switch_releases_previous_player() {
+        let mut app = Ribb::new();
+        app.tabs[0].posts = vec![media_post("1"), media_post("2")];
+        let _ = app.update(Message::TogglePost("1".into()));
+        let current = deferred_video(&app, 0);
+        let _ = app.update(current);
+        assert!(app.tabs[0].video.contains_key("1"));
+
+        let _ = app.update(Message::TogglePost("2".into()));
+        assert!(app.tabs[0].video.is_empty());
+        let current = deferred_video(&app, 0);
+        let _ = app.update(current);
+        assert!(app.tabs[0].video.contains_key("2"));
+    }
+
+    #[test]
+    fn media_request_closed_tab_does_not_gain_a_player() {
+        let mut app = Ribb::new();
+        app.tabs[0].posts.push(media_post("1"));
+        let _ = app.update(Message::TogglePost("1".into()));
+        let delayed = deferred_video(&app, 0);
+        let closed = app.tabs[0].id;
+        let _ = app.update(Message::NewTab);
+        let _ = app.update(Message::CloseTab(closed));
+
+        let _ = app.update(delayed);
+        assert_eq!(app.tabs.len(), 1);
+        assert!(app.tabs[0].video.is_empty());
+        assert_ne!(app.tabs[0].id, closed);
+    }
+
+    #[test]
+    fn media_request_hidden_focused_tab_accepts_its_current_video() {
+        let mut app = Ribb::new();
+        app.tabs[0].posts.push(media_post("1"));
+        let _ = app.update(Message::TogglePost("1".into()));
+        let current = deferred_video(&app, 0);
+        let _ = app.update(Message::NewTab);
+        assert_eq!(app.active, 1);
+
+        let _ = app.update(current);
+        assert!(app.tabs[0].video.contains_key("1"));
+        assert!(app.tabs[1].video.is_empty());
+    }
+
+    #[test]
+    fn media_request_failed_search_rejects_delayed_video() {
+        let mut app = Ribb::new();
+        app.tabs[0].posts.push(media_post("1"));
+        let _ = app.update(Message::TogglePost("1".into()));
+        let delayed = deferred_video(&app, 0);
+
+        let _ = app.update(Message::PostsLoaded {
+            tab: app.tabs[0].id,
+            generation: app.tabs[0].generation,
+            attempt: MAX_FETCH_ATTEMPTS - 1,
+            result: Err("failed".into()),
+        });
+        let _ = app.update(delayed);
+        assert!(app.tabs[0].video.is_empty());
+        assert!(app.tabs[0].swf.is_empty());
+    }
+
+    #[test]
+    fn media_request_focus_exit_aborts_pending_fetch() {
+        let mut app = Ribb::new();
+        app.tabs[0].posts.push(media_post("1"));
+        let _ = app.update(Message::TogglePost("1".into()));
+        let (_, abort) = Task::done(Message::Noop).abortable();
+        app.tabs[0].pending_media.as_mut().unwrap()._abort = abort.clone().abort_on_drop();
+        assert!(!abort.is_aborted());
+
+        let _ = app.update(Message::TogglePost("1".into()));
+        assert!(abort.is_aborted());
+        assert!(app.tabs[0].pending_media.is_none());
+    }
+
+    #[test]
+    fn media_request_failed_fetch_clears_pending_owner() {
+        let mut app = Ribb::new();
+        app.tabs[0].posts.push(media_post("1"));
+        let _ = app.update(Message::TogglePost("1".into()));
+        let request = app.tabs[0].pending_media.as_ref().unwrap().request.clone();
+
+        let _ = app.update(Message::VideoLoaded {
+            request,
+            bytes: None,
+        });
+        assert!(app.tabs[0].pending_media.is_none());
+        assert!(app.tabs[0].video.is_empty());
+    }
+
+    #[test]
+    fn media_request_failed_swf_clears_pending_owner() {
+        let mut app = Ribb::new();
+        app.tabs[0]
+            .posts
+            .push(image_post("1", "https://x/1.swf", ""));
+        let _ = app.update(Message::TogglePost("1".into()));
+        let request = app.tabs[0].pending_media.as_ref().unwrap().request.clone();
+
+        let _ = app.update(Message::SwfLoaded {
+            request,
+            bytes: None,
+        });
+        assert!(app.tabs[0].pending_media.is_none());
+        assert!(app.tabs[0].swf.is_empty());
+    }
+
+    #[test]
+    fn media_request_search_start_aborts_pending_fetch() {
+        let mut app = Ribb::new();
+        app.tabs[0].posts.push(media_post("1"));
+        let _ = app.update(Message::TogglePost("1".into()));
+        let (_, abort) = Task::done(Message::Noop).abortable();
+        app.tabs[0].pending_media.as_mut().unwrap()._abort = abort.clone().abort_on_drop();
+
+        let _ = app.update(Message::SubmitSearch);
+        assert!(abort.is_aborted());
+        assert!(app.tabs[0].pending_media.is_none());
+    }
 
     fn image_post(id: &str, url: &str, preview: &str) -> BooruPost {
         BooruPost {
