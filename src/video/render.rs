@@ -10,7 +10,7 @@
 //! Ported from ~/code/finn's grid renderer, keyed per-player instead of per-cell.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use iced::advanced::graphics::Viewport;
 use iced::widget::shader::{self, Primitive};
@@ -21,6 +21,7 @@ use super::decoder::RgbaFrame;
 /// The per-player program handed to the `shader` widget each `view()`.
 pub struct VideoProgram {
     pub id: u64,
+    pub(super) lifetime: Weak<()>,
     pub version: u64,
     pub frame: Option<Arc<RgbaFrame>>,
 }
@@ -32,6 +33,7 @@ impl<Message> shader::Program<Message> for VideoProgram {
     fn draw(&self, _state: &(), _cursor: mouse::Cursor, _bounds: Rectangle) -> VideoPrimitive {
         VideoPrimitive {
             id: self.id,
+            lifetime: self.lifetime.clone(),
             version: self.version,
             frame: self.frame.clone(),
         }
@@ -41,6 +43,7 @@ impl<Message> shader::Program<Message> for VideoProgram {
 #[derive(Clone)]
 pub struct VideoPrimitive {
     id: u64,
+    lifetime: Weak<()>,
     version: u64,
     frame: Option<Arc<RgbaFrame>>,
 }
@@ -66,6 +69,9 @@ impl Primitive for VideoPrimitive {
         bounds: &Rectangle,
         viewport: &Viewport,
     ) {
+        if self.lifetime.strong_count() == 0 {
+            return;
+        }
         let Some(frame) = &self.frame else {
             return;
         };
@@ -82,7 +88,7 @@ impl Primitive for VideoPrimitive {
             ?phys,
             "preparing media shader"
         );
-        pipeline.prepare(device, queue, self.id, self.version, frame, phys);
+        pipeline.prepare(device, queue, self, frame, phys);
     }
 
     fn render(
@@ -120,6 +126,7 @@ pub struct VideoPipeline {
 
 #[derive(Debug)]
 struct Target {
+    lifetime: Weak<()>,
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
@@ -223,6 +230,11 @@ impl shader::Pipeline for VideoPipeline {
             targets: HashMap::new(),
         }
     }
+
+    fn trim(&mut self) {
+        self.targets
+            .retain(|_, target| target.lifetime.strong_count() > 0);
+    }
 }
 
 impl VideoPipeline {
@@ -230,11 +242,12 @@ impl VideoPipeline {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        id: u64,
-        version: u64,
+        primitive: &VideoPrimitive,
         frame: &RgbaFrame,
         bounds: Rectangle,
     ) {
+        let id = primitive.id;
+        let version = primitive.version;
         let needs_texture = match self.targets.get(&id) {
             Some(t) => t.width != frame.width || t.height != frame.height,
             None => true,
@@ -283,6 +296,7 @@ impl VideoPipeline {
             self.targets.insert(
                 id,
                 Target {
+                    lifetime: primitive.lifetime.clone(),
                     texture,
                     bind_group,
                     uniform,
@@ -416,3 +430,83 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return textureSample(tex, samp, in.uv);
 }
 "#;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::video::Player;
+
+    fn player(width: u32, height: u32) -> Player {
+        let image = image::RgbaImage::from_pixel(width, height, image::Rgba([20, 40, 60, 255]));
+        let mut bytes = Vec::new();
+        image::codecs::gif::GifEncoder::new(&mut bytes)
+            .encode_frame(image::Frame::new(image.clone()))
+            .unwrap();
+        let mut player = Player::from_bytes(&bytes).unwrap();
+        player.current = Some(Arc::new(RgbaFrame {
+            width,
+            height,
+            data: image.into_raw(),
+            pts_ms: 0,
+        }));
+        player
+    }
+
+    fn draw(program: &VideoProgram, bounds: Rectangle) -> VideoPrimitive {
+        <VideoProgram as shader::Program<()>>::draw(
+            program,
+            &(),
+            mouse::Cursor::Unavailable,
+            bounds,
+        )
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a GPU adapter"]
+    async fn gpu_targets_follow_player_lifetimes() {
+        let instance = wgpu::Instance::default();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .await
+            .expect("a GPU adapter is required for this test");
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor::default())
+            .await
+            .unwrap();
+        let mut pipeline = <VideoPipeline as shader::Pipeline>::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        let bounds = Rectangle::new(iced::Point::ORIGIN, iced::Size::new(64.0, 64.0));
+        let viewport = Viewport::with_physical_size(iced::Size::new(64, 64), 1.0);
+
+        for size in 1..=3 {
+            let a = player(size, size + 1);
+            let b = player(size + 1, size);
+            let program_a = a.program();
+            let program_b = b.program();
+            let primitive_a = draw(&program_a, bounds);
+            let primitive_b = draw(&program_b, bounds);
+            primitive_a.prepare(&mut pipeline, &device, &queue, &bounds, &viewport);
+            primitive_b.prepare(&mut pipeline, &device, &queue, &bounds, &viewport);
+            draw(&a.program(), bounds).prepare(&mut pipeline, &device, &queue, &bounds, &viewport);
+            queue.submit([]);
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            shader::Pipeline::trim(&mut pipeline);
+            assert_eq!(pipeline.targets.len(), 2);
+
+            drop(a);
+            shader::Pipeline::trim(&mut pipeline);
+            assert_eq!(pipeline.targets.len(), 1);
+            assert!(pipeline.targets.contains_key(&program_b.id));
+            primitive_a.prepare(&mut pipeline, &device, &queue, &bounds, &viewport);
+            assert!(!pipeline.targets.contains_key(&program_a.id));
+
+            drop(b);
+            shader::Pipeline::trim(&mut pipeline);
+            assert!(pipeline.targets.is_empty());
+            primitive_b.prepare(&mut pipeline, &device, &queue, &bounds, &viewport);
+            assert!(pipeline.targets.is_empty());
+        }
+    }
+}

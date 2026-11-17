@@ -29,6 +29,7 @@ static NEXT_PLAYER_ID: AtomicU64 = AtomicU64::new(0);
 /// backing ffmpeg's input (deleted on drop).
 pub struct Player {
     id: u64,
+    lifetime: Arc<()>,
     shared: Arc<Shared>,
     _file: tempfile::TempPath,
     /// cpal output; `None` if there's no device. When present and the input has
@@ -72,6 +73,7 @@ impl Player {
         let shared = decoder::spawn(file.to_path_buf(), ring);
         Player {
             id: NEXT_PLAYER_ID.fetch_add(1, Ordering::Relaxed),
+            lifetime: Arc::new(()),
             shared,
             _file: file,
             audio,
@@ -246,6 +248,7 @@ impl Player {
     pub fn program(&self) -> VideoProgram {
         VideoProgram {
             id: self.id,
+            lifetime: Arc::downgrade(&self.lifetime),
             version: self.version,
             frame: self.current.clone(),
         }
@@ -271,6 +274,7 @@ mod tests {
     fn player_after_audio_failure(playing: bool) -> Player {
         Player {
             id: 0,
+            lifetime: Arc::new(()),
             shared: Arc::new(Shared {
                 quit: AtomicBool::new(false),
                 opened: AtomicBool::new(true),
