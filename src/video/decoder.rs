@@ -1,14 +1,3 @@
-//! Video + audio decode on a background thread, built on ffmpeg-next (libav).
-//!
-//! The thread demuxes one file: video packets decode to tightly-packed RGBA8
-//! (via libswscale) and land on a bounded queue the UI drains; audio packets
-//! decode + resample (via libswresample) to the device's interleaved-f32 format
-//! and feed the cpal ring (see [`super::audio`]). The audio playback position is
-//! the master clock the UI syncs video to.
-//!
-//! Adapted from ~/code/finn's per-angle video decoder (which is video-only),
-//! minus the grid/segment machinery (single file, no seek yet).
-
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -38,6 +27,7 @@ pub struct RgbaFrame {
 
 /// How many decoded frames to buffer ahead before the decoder thread backs off.
 const VIDEO_QUEUE_CAP: usize = 8;
+const VIDEO_QUEUE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Shared state between the UI thread and the decoder thread.
 pub struct Shared {
@@ -107,6 +97,38 @@ struct AudioStream {
     out_rate: u32,
 }
 
+struct DecodeControl<'a> {
+    shared: &'a Shared,
+    stop: &'a AtomicBool,
+    seek_gen: u64,
+}
+
+impl DecodeControl<'_> {
+    fn stopped(&self) -> bool {
+        self.shared.quit.load(Ordering::Acquire) || self.stop.load(Ordering::Acquire)
+    }
+
+    fn interrupted(&self) -> bool {
+        self.stopped() || self.shared.seek_gen.load(Ordering::Acquire) != self.seek_gen
+    }
+}
+
+struct AudioWorker {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for AudioWorker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            if handle.join().is_err() {
+                tracing::warn!("audio decoder thread panicked");
+            }
+        }
+    }
+}
+
 fn open_audio(ictx: &ffmpeg::format::context::Input, ring: &AudioRing) -> Option<AudioStream> {
     let stream = ictx.streams().best(Type::Audio)?;
     let index = stream.index();
@@ -140,9 +162,12 @@ fn open_audio(ictx: &ffmpeg::format::context::Input, ring: &AudioRing) -> Option
     })
 }
 
-fn drain_audio(audio: &mut AudioStream, ring: &AudioRing) {
+fn drain_audio(audio: &mut AudioStream, ring: &AudioRing, control: &DecodeControl<'_>) {
     let mut frame = AudioFrame::empty();
     while audio.decoder.receive_frame(&mut frame).is_ok() {
+        if control.interrupted() {
+            return;
+        }
         let in_rate = frame.rate().max(1);
         // Size the output generously so swresample doesn't buffer the excess
         // internally (which would grow unbounded when upsampling, e.g. 44.1→48k).
@@ -159,7 +184,17 @@ fn drain_audio(audio: &mut AudioStream, ring: &AudioRing) {
         let bytes = out.data(0);
         let floats = bytes.len() / 4;
         let raw: &[f32] = bytemuck::cast_slice(&bytes[..floats * 4]);
-        ring.push(&raw[..produced.min(raw.len())]);
+        let mut samples = &raw[..produced.min(raw.len())];
+        while !samples.is_empty() {
+            if control.interrupted() {
+                return;
+            }
+            let written = ring.push(samples);
+            samples = &samples[written..];
+            if written == 0 {
+                thread::sleep(Duration::from_millis(3));
+            }
+        }
     }
 }
 
@@ -201,21 +236,39 @@ fn drain_video(
     scaler: &mut Option<Scaler>,
     tb_secs: f64,
     pts_offset: i64,
-    shared: &Shared,
+    control: &DecodeControl<'_>,
 ) {
     let mut frame = VideoFrame::empty();
     while decoder.receive_frame(&mut frame).is_ok() {
+        let bytes = frame.width() as usize * frame.height() as usize * 4;
+        loop {
+            if control.interrupted() {
+                return;
+            }
+            let frames = control.shared.frames.lock().unwrap();
+            let queued_bytes: usize = frames.iter().map(|frame| frame.data.len()).sum();
+            if frames.len() < VIDEO_QUEUE_CAP
+                && (frames.is_empty() || queued_bytes.saturating_add(bytes) <= VIDEO_QUEUE_BYTES)
+            {
+                break;
+            }
+            drop(frames);
+            thread::sleep(Duration::from_millis(3));
+        }
         let mut rgba = make_rgba(scaler, frame.clone(), tb_secs);
         // Each loop pass restarts pts at 0; offset it so frame pts stays
         // monotonic in lockstep with the continuous (audio/wall) clock.
         rgba.pts_ms += pts_offset;
-        shared.frames.lock().unwrap().push_back(rgba);
+        if control.interrupted() {
+            return;
+        }
+        control.shared.frames.lock().unwrap().push_back(rgba);
     }
 }
 
 fn run(
     path: &Path,
-    shared: &Shared,
+    shared: &Arc<Shared>,
     audio_ring: Option<Arc<AudioRing>>,
 ) -> Result<(), ffmpeg::Error> {
     let mut ictx = ffmpeg::format::input(&path)?;
@@ -236,16 +289,40 @@ fn run(
     };
     let mut v_scaler: Option<Scaler> = None;
 
-    // Optional audio stream + resampler.
-    let mut audio = audio_ring.as_ref().and_then(|ring| open_audio(&ictx, ring));
-    shared.has_audio.store(audio.is_some(), Ordering::Release);
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut audio_worker = AudioWorker {
+        stop: Arc::clone(&stop),
+        handle: None,
+    };
+    if let Some(ring) = audio_ring {
+        let audio_input = ffmpeg::format::input(&path)?;
+        if let Some(audio) = open_audio(&audio_input, &ring) {
+            let shared = Arc::clone(shared);
+            let stop = Arc::clone(&stop);
+            audio_worker.handle = Some(
+                thread::Builder::new()
+                    .name("ribb-audio".into())
+                    .spawn(move || {
+                        run_audio(audio_input, audio, &ring, &shared, &stop, duration_ms)
+                    })
+                    .expect("spawn audio decoder thread"),
+            );
+        }
+    }
+    shared
+        .has_audio
+        .store(audio_worker.handle.is_some(), Ordering::Release);
     shared.opened.store(true, Ordering::Release);
 
     // Accumulated pts offset for the current loop pass (see `drain_video`).
     let mut loop_offset: i64 = 0;
-    let mut cur_seek_gen = shared.seek_gen.load(Ordering::Acquire);
+    let mut control = DecodeControl {
+        shared,
+        stop: &stop,
+        seek_gen: 0,
+    };
     loop {
-        if shared.quit.load(Ordering::Acquire) {
+        if control.stopped() {
             return Ok(());
         }
 
@@ -253,33 +330,16 @@ fn run(
         // buffered output so playback resumes at the target. `loop_offset` is set
         // so post-seek frame pts line up with the rebased clock (target = N*dur+T).
         let sg = shared.seek_gen.load(Ordering::Acquire);
-        if sg != cur_seek_gen {
-            cur_seek_gen = sg;
+        if sg != control.seek_gen {
+            control.seek_gen = sg;
             if duration_ms > 0 {
                 let target = shared.seek_target_ms.load(Ordering::Acquire).max(0);
                 let file_t = target % duration_ms;
                 loop_offset = target - file_t;
                 let _ = ictx.seek(file_t * 1000, ..);
                 v_decoder.flush();
-                if let Some(a) = &mut audio {
-                    a.decoder.flush();
-                }
                 shared.frames.lock().unwrap().clear();
-                if let Some(ring) = &audio_ring {
-                    ring.clear();
-                }
             }
-            continue;
-        }
-
-        // Backpressure: only read more once at least one buffer has room.
-        let video_full = shared.frames.lock().unwrap().len() >= VIDEO_QUEUE_CAP;
-        let audio_full = match (&audio, &audio_ring) {
-            (Some(_), Some(ring)) => ring.is_full(),
-            _ => true,
-        };
-        if video_full && audio_full {
-            thread::sleep(Duration::from_millis(3));
             continue;
         }
 
@@ -294,13 +354,8 @@ fn run(
                         &mut v_scaler,
                         v_tb_secs,
                         loop_offset,
-                        shared,
+                        &control,
                     );
-                } else if let (Some(a), Some(ring)) = (&mut audio, &audio_ring) {
-                    if stream == a.index {
-                        let _ = a.decoder.send_packet(&packet);
-                        drain_audio(a, ring);
-                    }
                 }
             }
             Err(_) => {
@@ -311,11 +366,10 @@ fn run(
                     &mut v_scaler,
                     v_tb_secs,
                     loop_offset,
-                    shared,
+                    &control,
                 );
-                if let (Some(a), Some(ring)) = (&mut audio, &audio_ring) {
-                    let _ = a.decoder.send_eof();
-                    drain_audio(a, ring);
+                if control.interrupted() {
+                    continue;
                 }
 
                 if duration_ms > 0 {
@@ -324,17 +378,69 @@ fn run(
                     // clock keeps advancing seamlessly across the boundary.
                     let _ = ictx.seek(0, ..);
                     v_decoder.flush();
-                    if let Some(a) = &mut audio {
-                        a.decoder.flush();
-                    }
                     loop_offset += duration_ms;
                 } else {
                     // Unknown duration: can't loop cleanly, hold and idle.
                     shared.eof.store(true, Ordering::Release);
-                    while !shared.quit.load(Ordering::Acquire) {
+                    while !control.interrupted() {
                         thread::sleep(Duration::from_millis(20));
                     }
-                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+fn run_audio(
+    mut input: ffmpeg::format::context::Input,
+    mut audio: AudioStream,
+    ring: &AudioRing,
+    shared: &Shared,
+    stop: &AtomicBool,
+    duration_ms: i64,
+) {
+    let mut control = DecodeControl {
+        shared,
+        stop,
+        seek_gen: 0,
+    };
+    loop {
+        if control.stopped() {
+            return;
+        }
+        let seek_gen = shared.seek_gen.load(Ordering::Acquire);
+        if seek_gen != control.seek_gen {
+            control.seek_gen = seek_gen;
+            if duration_ms > 0 {
+                let target = shared.seek_target_ms.load(Ordering::Acquire).max(0);
+                let _ = input.seek((target % duration_ms) * 1000, ..);
+                audio.decoder.flush();
+                ring.clear();
+            }
+            continue;
+        }
+
+        let mut packet = ffmpeg::Packet::empty();
+        match packet.read(&mut input) {
+            Ok(()) => {
+                if packet.stream() == audio.index {
+                    let _ = audio.decoder.send_packet(&packet);
+                    drain_audio(&mut audio, ring, &control);
+                }
+            }
+            Err(_) => {
+                let _ = audio.decoder.send_eof();
+                drain_audio(&mut audio, ring, &control);
+                if control.interrupted() {
+                    continue;
+                }
+                if duration_ms > 0 {
+                    let _ = input.seek(0, ..);
+                    audio.decoder.flush();
+                } else {
+                    while !control.interrupted() {
+                        thread::sleep(Duration::from_millis(20));
+                    }
                 }
             }
         }
@@ -355,6 +461,10 @@ mod tests {
 
     impl GifDecoder {
         fn new() -> Self {
+            Self::with_size(4, 4)
+        }
+
+        fn with_size(width: u32, height: u32) -> Self {
             // No extension, just like Player's downloaded temp files. Distinct
             // delays and transparent backgrounds exercise GIF timing/disposal.
             let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -369,7 +479,7 @@ mod tests {
                 .into_iter()
                 .enumerate()
                 {
-                    let mut image = RgbaImage::new(4, 4);
+                    let mut image = RgbaImage::new(width, height);
                     image.put_pixel(i as u32 + 1, 0, Rgba(color));
                     encoder
                         .encode_frame(Frame::from_parts(
@@ -455,5 +565,48 @@ mod tests {
         assert_eq!(frames[target].data[12..16], [0, 0, 255, 255]);
         assert_eq!(frames[target + 1].pts_ms, 960);
         assert_eq!(frames[target + 1].data[4..8], [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn undisplayed_video_stays_bounded_and_stops_while_full() {
+        let decoder = GifDecoder::new();
+        decoder.wait_for(|s| s.frames.lock().unwrap().len() == VIDEO_QUEUE_CAP);
+        thread::sleep(Duration::from_millis(30));
+        assert_eq!(decoder.shared.frames.lock().unwrap().len(), VIDEO_QUEUE_CAP);
+        decoder.shared.quit.store(true, Ordering::Release);
+        decoder.wait_for(|s| s.eof.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn large_video_frames_respect_the_queue_byte_budget() {
+        let decoder = GifDecoder::with_size(2048, 2048);
+        decoder.wait_for(|s| {
+            s.frames
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|frame| frame.data.len())
+                .sum::<usize>()
+                >= VIDEO_QUEUE_BYTES
+        });
+        thread::sleep(Duration::from_millis(30));
+        let frames = decoder.shared.frames.lock().unwrap();
+        assert_eq!(frames.len(), 4);
+        assert_eq!(
+            frames.iter().map(|frame| frame.data.len()).sum::<usize>(),
+            64 * 1024 * 1024
+        );
+        drop(frames);
+        decoder.shared.seek_target_ms.store(720, Ordering::Release);
+        decoder.shared.seek_gen.fetch_add(1, Ordering::Release);
+        decoder.wait_for(|s| {
+            s.frames
+                .lock()
+                .unwrap()
+                .front()
+                .is_some_and(|frame| frame.pts_ms >= 480)
+        });
+        decoder.shared.quit.store(true, Ordering::Release);
+        decoder.wait_for(|s| s.eof.load(Ordering::Acquire));
     }
 }

@@ -21,24 +21,23 @@ pub struct AudioRing {
     muted: AtomicBool,
     pub channels: u16,
     pub sample_rate: u32,
-    /// Backpressure threshold (~1s of interleaved samples).
     cap: usize,
 }
 
 impl AudioRing {
-    /// Append interleaved samples (called by the decoder).
-    pub fn push(&self, samples: &[f32]) {
-        self.buf.lock().unwrap().extend(samples.iter().copied());
+    /// Append as many complete sample frames as fit, returning the sample count.
+    pub fn push(&self, samples: &[f32]) -> usize {
+        let mut buf = self.buf.lock().unwrap();
+        let channels = self.channels as usize;
+        let available = self.cap.saturating_sub(buf.len());
+        let count = samples.len().min(available) / channels * channels;
+        buf.extend(samples[..count].iter().copied());
+        count
     }
 
     /// Drop all buffered samples (on seek, so stale audio doesn't play).
     pub fn clear(&self) {
         self.buf.lock().unwrap().clear();
-    }
-
-    /// Whether the ring is at capacity (decoder backpressure).
-    pub fn is_full(&self) -> bool {
-        self.buf.lock().unwrap().len() >= self.cap
     }
 
     /// Per-channel frames played so far (the playback clock numerator).
@@ -171,5 +170,53 @@ fn fill<T: Copy>(ring: &AudioRing, out: &mut [T], conv: impl Fn(f32) -> T) {
     if ring.channels > 0 {
         ring.samples_played
             .fetch_add((real / ring.channels as usize) as u64, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ring() -> AudioRing {
+        AudioRing {
+            buf: Mutex::new(VecDeque::new()),
+            samples_played: AtomicU64::new(0),
+            muted: AtomicBool::new(false),
+            channels: 2,
+            sample_rate: 4,
+            cap: 8,
+        }
+    }
+
+    #[test]
+    fn writes_cannot_exceed_the_audio_buffer_capacity() {
+        let ring = ring();
+        ring.push(&[0.5; 20]);
+        assert_eq!(ring.buf.lock().unwrap().len(), 8);
+    }
+
+    #[test]
+    fn draining_makes_room_without_dropping_unwritten_samples() {
+        let ring = ring();
+        let samples = [0.25; 12];
+        let written = ring.push(&samples);
+        assert_eq!(written, 8);
+        assert_eq!(ring.push(&samples[written..]), 0);
+        let mut output = [0.0; 4];
+        fill(&ring, &mut output, |sample| sample);
+        assert_eq!(output, [0.25; 4]);
+        assert_eq!(ring.frames_played(), 2);
+        assert_eq!(ring.push(&samples[written..]), 4);
+        assert_eq!(ring.buf.lock().unwrap().len(), 8);
+    }
+
+    #[test]
+    fn writes_preserve_complete_interleaved_sample_frames() {
+        let ring = ring();
+        assert_eq!(ring.push(&[0.25; 7]), 6);
+        assert_eq!(ring.push(&[0.5; 5]), 2);
+        assert_eq!(ring.buf.lock().unwrap().len(), 8);
+        ring.clear();
+        assert_eq!(ring.push(&[0.75; 8]), 8);
     }
 }
